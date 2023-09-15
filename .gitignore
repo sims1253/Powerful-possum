@@ -47,3 +47,29 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Quarto stuff
+/.quarto/
+**/*_cache/*
+_site/
+manuscript/output/
+
+*.pdf
+*.html
+*.docx
+*.odt
+*.log
+*.aux
+manuscript/manuscript.tex
+
+# Targets stuff
+_targets
+_targets.yaml
+
+# Data stuff
+data/raw_data/
+data/manual_data/
+data/derived_data/
+
+notebook/**_cache
+notebook/**_files
