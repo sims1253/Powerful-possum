@@ -71,5 +71,5 @@ data/raw_data/
 data/manual_data/
 data/derived_data/
 
-notebook/**_cache
-notebook/**_files
+notebook/**/**_cache
+notebook/**/**_files

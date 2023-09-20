@@ -1,0 +1,232 @@
+---
+title: "Inverse Forward Sampling Case Studies"
+author: "Maximilian Scholz"
+editor: visual
+execute: 
+  cache: true
+  autodep: true
+format:
+  html:
+    embed-resources: true
+    smooth-scroll: true
+    anchor-sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
+                      fig.width = 6, fig.height = (6 * 0.618),
+                      out.width = "80%", collapse = TRUE,
+                      dev = "png", dev.args = list(type = "cairo-png"))
+
+options(digits = 3, width = 120,
+        dplyr.summarise.inform = FALSE,
+        knitr.kable.NA = "")
+```
+
+```{r load-libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(brms)
+library(bayesim)
+library(bayeshear)
+library(patchwork)
+library(tidybayes)
+library(future)
+library(SBC)
+library(posterior)
+
+set.seed(671126974)
+plan(multisession)
+#options(brms.backend = "cmdstanr")
+options(SBC.min_chunk_size = 5)
+cache_dir <- "../_brms_SBC_cache"
+SBC_DSN = 200
+```
+
+```{r create-data}
+N <- 100
+K <- 15
+beta <- rep(1, K)
+alpha <- 3
+X <- matrix(rnorm(N * K), N, K)
+eta <- alpha + X %*% beta
+mu <- exp(eta)
+
+shape <- 1
+scale <- mu / shape
+y <- rgamma(N, shape = shape, scale = scale)
+hist(y)
+
+df <- as.data.frame(cbind(y, X))
+```
+
+```{r single-generator, warning=FALSE, message=FALSE}
+single_generator <- function(n, fit, precon_sample = NULL, ...) {
+  beta <- rnorm(K, 0, 1)
+  alpha <- rnorm(1, 2, 2)
+  X <- matrix(rnorm(N * K), N, K)
+  y <- rep(1, N)
+  data <- as.data.frame(cbind(y, X))
+  
+  index <- sample.int(post_warmup_samples(fit), size = 1)
+  dataset <- forward_sampling(
+    fit,
+    index,
+    n,
+    data,
+    ...)
+  dataset$y <- ifelse(dataset$y < 10e-15, 10e-15, dataset$y)
+  
+  pars <- as_draws_df(fit)[index,]
+  attr(pars, "draws_df") = NULL
+  pars <-   pars[ , -which(
+    names(
+      pars <- as_draws_df(fit)
+      ) %in% c(".chain",".iteration", ".draw"))]
+  
+  list(
+    variables = pars,
+    generated = rbind(precon_sample[,colnames(dataset)], dataset)
+  )
+}
+```
+
+# Wide Prior Case
+```{r wide-model-prep, warning=FALSE, message=FALSE}
+wide_prior_model <- brm(bf(y ~ ., center = FALSE), 
+             data = df,
+             family = Gamma("log"),
+             prior = prior(normal(0, 100), class = "b") +
+               prior(normal(0, 100), class = "b", coef = "Intercept") +
+               prior(gamma(0.001, 0.001), class = "shape"),
+             sample_prior = "only",
+             silent = 2,
+             refresh = 0,
+             cores = 4)
+pp_check(wide_prior_model)
+```
+
+## Plain SBC
+```{r plain-sbc-prep, warning=FALSE, message=FALSE, error = TRUE}
+plain_n_sims_generator <- SBC_generator_function(
+  single_generator,
+  n = nrow(df),
+  fit = wide_prior_model)
+
+plain_datasets <- generate_datasets(plain_n_sims_generator, SBC_DSN)
+
+plain_backend <- SBC_backend_brms(wide_prior_model$formula,  
+                            prior = prior_summary(wide_prior_model), chains = 1,
+                            template_data = plain_datasets$generated[[1]], init = 0)
+
+
+```
+
+Here be a bazillion muted init errors:
+```{r plain-sbc-calc, error = TRUE,output = FALSE}
+plain_results <- compute_SBC(plain_datasets,
+                              plain_backend, 
+                              cache_mode = "results", 
+                              cache_location = file.path(cache_dir, "plain"))
+```
+
+```{r plain-sbc-res, error = TRUE, warning=FALSE, message=FALSE}
+plot_rank_hist(plain_results)
+plot_ecdf_diff(plain_results)
+```
+
+## Preconditioning on 5% of data
+
+```{r fit-preconditioned-model, message=FALSE, warning=FALSE}
+# Split the df into a preconditioning part and the rest
+index <- sample(c(TRUE, FALSE), nrow(df), replace=TRUE, prob=c(0.8,0.2))
+precondition_sample <- df[!index,]
+
+# Fit the model on the precondition sample
+ifs_fit <- brm(
+  wide_prior_model$formula, 
+  data = precondition_sample,
+  prior = prior_summary(wide_prior_model),
+  silent = 2,
+  refresh = 0,
+   cores = 4
+  )
+pp_check(ifs_fit)
+```
+
+## IFS SBC
+
+```{r ifs-sbc-prep, warning=FALSE, message=FALSE}
+ifs_n_sims_generator <- SBC_generator_function(
+  single_generator,
+  n = nrow(df),
+  fit = ifs_fit,
+  precon_sample = precondition_sample)
+
+ifs_datasets <- generate_datasets(ifs_n_sims_generator, SBC_DSN)
+
+ifs_backend <- SBC_backend_brms(wide_prior_model$formula,  
+                            prior = prior_summary(wide_prior_model), chains = 1,
+                            template_data = ifs_datasets$generated[[1]])
+
+
+```
+
+```{r ifs-sbc-calc, warning=FALSE, message=FALSE}
+ifs_results <- compute_SBC(ifs_datasets,
+                           ifs_backend, 
+                           cache_mode = "results", 
+                           cache_location = file.path(cache_dir, "ifs"))
+plot_rank_hist(ifs_results)
+plot_ecdf_diff(ifs_results)
+```
+
+# What if we used flat priors?
+
+```{r flat-model-prep, warning=FALSE, message=FALSE}
+flat_prior_model <- brm(bf(y ~ ., center = FALSE), 
+             data = df,
+             family = Gamma("log"),
+             prior = prior("", class = "b") +
+             prior("", class = "b", coef = "Intercept") +
+             prior("", class = "shape"),
+             chains = 0,
+             silent = 2,
+             refresh = 0)
+```
+```{r flat-preconditioned-model, message=FALSE, warning=FALSE}
+# Fit the model on the precondition sample
+ifs_flat_fit <- brm(
+  flat_prior_model$formula, 
+  data = precondition_sample,
+  prior = prior_summary(flat_prior_model),
+  silent = 2,
+  refresh = 0,
+   cores = 4
+  )
+pp_check(ifs_flat_fit)
+```
+
+```{r ifs-flat-sbc-prep, warning=FALSE, message=FALSE}
+ifs_flat_n_sims_generator <- SBC_generator_function(
+  single_generator,
+  n = nrow(df),
+  fit = ifs_flat_fit,
+  precon_sample = precondition_sample)
+
+ifs_flat_datasets <- generate_datasets(ifs_flat_n_sims_generator, SBC_DSN)
+
+ifs_flat_backend <- SBC_backend_brms(ifs_flat_fit$formula,  
+                            prior = prior_summary(ifs_flat_fit), chains = 1,
+                            template_data = ifs_flat_datasets$generated[[1]])
+
+
+```
+
+```{r ifs-flat-sbc-calc, warning=FALSE, message=FALSE}
+ifs_flat_results <- compute_SBC(ifs_flat_datasets,
+                           ifs_flat_backend, 
+                           cache_mode = "results", 
+                           cache_location = file.path(cache_dir, "ifs"))
+plot_rank_hist(ifs_flat_results)
+plot_ecdf_diff(ifs_flat_results)
+```
