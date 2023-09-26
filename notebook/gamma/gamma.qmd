@@ -43,7 +43,7 @@ SBC_DSN = 200
 ```
 
 ```{r create-data}
-N <- 100
+N <- 50
 K <- 15
 beta <- rep(1, K)
 alpha <- 3
@@ -91,6 +91,7 @@ single_generator <- function(n, fit, precon_sample = NULL, ...) {
 ```
 
 # Wide Prior Case
+
 ```{r wide-model-prep, warning=FALSE, message=FALSE}
 wide_prior_model <- brm(bf(y ~ ., center = FALSE), 
              data = df,
@@ -106,6 +107,7 @@ pp_check(wide_prior_model)
 ```
 
 ## Plain SBC
+
 ```{r plain-sbc-prep, warning=FALSE, message=FALSE, error = TRUE}
 plain_n_sims_generator <- SBC_generator_function(
   single_generator,
@@ -122,6 +124,7 @@ plain_backend <- SBC_backend_brms(wide_prior_model$formula,
 ```
 
 Here be a bazillion muted init errors:
+
 ```{r plain-sbc-calc, error = TRUE,output = FALSE}
 plain_results <- compute_SBC(plain_datasets,
                               plain_backend, 
@@ -180,6 +183,32 @@ plot_rank_hist(ifs_results)
 plot_ecdf_diff(ifs_results)
 ```
 
+## IFS SBC without precon data
+
+```{r ifs-sbc-prep, warning=FALSE, message=FALSE}
+ifs_n_sims_generator_no_precon <- SBC_generator_function(
+  single_generator,
+  n = nrow(df),
+  fit = ifs_fit)
+
+ifs_datasets_no_precon <- generate_datasets(ifs_n_sims_generator_no_precon, SBC_DSN)
+
+ifs_backend_no_precon <- SBC_backend_brms(wide_prior_model$formula,  
+                            prior = prior_summary(wide_prior_model), chains = 1,
+                            template_data = ifs_datasets_no_precon$generated[[1]])
+
+
+```
+
+```{r ifs-sbc-calc, warning=FALSE, message=FALSE}
+ifs_results_no_precon <- compute_SBC(ifs_datasets_no_precon,
+                           ifs_backend_no_precon, 
+                           cache_mode = "results", 
+                           cache_location = file.path(cache_dir, "ifs"))
+plot_rank_hist(ifs_results_no_precon)
+plot_ecdf_diff(ifs_results_no_precon)
+```
+
 # What if we used flat priors?
 
 ```{r flat-model-prep, warning=FALSE, message=FALSE}
@@ -193,6 +222,7 @@ flat_prior_model <- brm(bf(y ~ ., center = FALSE),
              silent = 2,
              refresh = 0)
 ```
+
 ```{r flat-preconditioned-model, message=FALSE, warning=FALSE}
 # Fit the model on the precondition sample
 ifs_flat_fit <- brm(
