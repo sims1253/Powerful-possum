@@ -13,6 +13,7 @@ format:
 ---
 
 # Setup
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
                       fig.width = 6, fig.height = (6 * 0.618),

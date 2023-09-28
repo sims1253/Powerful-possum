@@ -13,6 +13,7 @@ format:
 ---
 
 # Setup
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
                       fig.width = 6, fig.height = (6 * 0.618),
@@ -34,18 +35,24 @@ library(tidybayes)
 library(future)
 library(SBC)
 library(posterior)
+library(bayesplot)
+#library(progress)
+
+library(doFuture)
+plan(multisession)
 
 set.seed(671126974)
 plan(multisession)
-options(brms.backend = "cmdstanr")
+#options(brms.backend = "cmdstanr")
 options(SBC.min_chunk_size = 5)
 cache_dir <- "../_brms_SBC_cache"
+
 ```
 
 ```{r settings}
-SBC_DSN = 200
-N_PRE = 20
-N_SBC = 20
+SBC_DSN = 100
+N_PRE = 30
+N_SBC = 30
 K = 15
 ```
 
@@ -68,62 +75,87 @@ precon_ds <- function(N, K){
 
 ```
 
-```{r create-precon-data}
-
-df <- precon_ds(N = N_PRE, K = K)
-
-empty <- brm(bf(y ~ ., center = FALSE), 
-             data = df, family = Gamma("log"),
-             prior = prior(normal(0, 100), class = "b") +
-               prior(normal(0, 100), class = "b", coef = "Intercept") +
-               prior(gamma(0.001, 0.001), class = "shape"),
-             chains = 1, sample_prior = "only")
-pp_check(empty)
-
-set.seed(1234)
-ranks <- matrix(nrow = SBC_DSN, ncol = K + 2)
-colnames(ranks) <- c(paste0("b_", 0:K), "shape")
-for (i in 1:SBC_DSN) {
-  print(i)
-  beta <- rnorm(K, 0, 1)
-  alpha <- rnorm(1, 2, 2)
-  X <- matrix(rnorm(n * K), n, K)
-  y <- rep(1, n)
-  data <- as.data.frame(cbind(y, X))
+```{r homebrew-sbc}
+SBC <- function(gen_fit, sbc_fit, n_sbc, SBC_DSN, precon_sample, add_precon_sample = FALSE, ...){
+  pars <- colnames(as_draws_df(precon_fit))[
+    !names(as_draws_df(gen_fit)) %in% c(".chain",".iteration", ".draw")]
+  ranks <- as.data.frame(matrix(nrow = SBC_DSN, ncol = length(pars)))
+  colnames(ranks) <- pars
   
-  index <- sample.int(post_warmup_samples(fit), size = 1)
-  dataset <- forward_sampling(
-    fit,
-    index,
-    n,
-    data,
-    ...)
-  dataset$y <- ifelse(dataset$y < 10e-15, 10e-15, dataset$y)
+ results <- foreach(i = seq(SBC_DSN), .options.future = list(seed = TRUE)) %dofuture% {
+ # for (i in seq_along(results)) {
+    index <- sample.int(post_warmup_samples(gen_fit), size = 1)
+    dataset <- forward_sampling(
+      x = gen_fit,
+      i = index,
+      n = n_sbc,
+      ...)
+    dataset$y <- ifelse(dataset$y < 10e-15, 10e-15, dataset$y)
+    
+    if(add_precon_sample){
+      dataset <- rbind(dataset, precon_sample)
+    }
+    
+    true_pars <- as.data.frame(as_draws_matrix(gen_fit)[index,])
+    
+    fit <- update(sbc_fit, newdata = dataset, chains = 1, refresh = 0, silent = 2)
+    fit_pars <- as.data.frame(as_draws_matrix(fit))
+    
+    tmp <- vector(mode = "numeric", length = ncol(fit_pars))
+    names(tmp) <- pars
+    for (name in colnames(fit_pars)){
+      tmp[[name]] <- sum(fit_pars[[name]] < true_pars[[name]])
+    }
+    tmp
+    #ranks[i, ] <- tmp
+    }
   
-  pars <- as_draws_df(fit)[index,]
-  attr(pars, "draws_df") = NULL
-  pars <-   pars[ , -which(
-    names(
-      pars <- as_draws_df(fit)
-      ) %in% c(".chain",".iteration", ".draw"))]
+  for (i in seq_along(results)) {
+    ranks[i, ] <- results[[i]]
+  }
   
-  list(
-    variables = pars,
-    generated = rbind(precon_sample[,colnames(dataset)], dataset)
-  )
-  
-  df <- as.data.frame(cbind(y, X))
-  fit <- update(empty, newdata = df, chains = 1, silent = 2)
-  ps <- as.matrix(fit, variable = c("^b_", "shape"), regex = TRUE)
-  ranks[i, ] <- colSums(sweep(ps, 2, c(alpha, beta, shape), "<"))
+ 
+ ranks_df <- ranks %>%
+  mutate(sim_id=seq_len(n())) %>%
+  gather(key = "variable", value="rank", -sim_id)
+ 
+ return(ranks_df)
 }
+
+```
+
+```{r run}
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
+wide_prior <-  prior(normal(0, 100), class = "b") +
+               prior(normal(2, 100), class = "b", coef = "Intercept") +
+               prior(gamma(0.001, 0.001), class = "shape")
+
+prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = wide_prior,
+                  cores = 4,
+                  sample_prior = "only"
+                  )
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = wide_prior,
+                  cores = 4
+                  )
+
+
+
 
 # apply(ranks, 2, hist)
 
-ranks_df <- ranks %>%
-  as.data.frame() %>%
-  mutate(dataset_id=seq_len(n())) %>%
-  gather(key = "parameter", value="rank", -dataset_id)
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = prior_only_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, add_precon_sample = TRUE)
 
-plot_ecdf_diff(ranks_df, max_rank=1000)
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = prior_only_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, add_precon_sample = FALSE)
+
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
 ```
