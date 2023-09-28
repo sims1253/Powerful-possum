@@ -1,0 +1,129 @@
+---
+title: "Inverse Forward Sampling Case Studies"
+author: "Maximilian Scholz"
+editor: visual
+execute: 
+  cache: true
+  autodep: true
+format:
+  html:
+    embed-resources: true
+    smooth-scroll: true
+    anchor-sections: true
+---
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
+                      fig.width = 6, fig.height = (6 * 0.618),
+                      out.width = "80%", collapse = TRUE,
+                      dev = "png", dev.args = list(type = "cairo-png"))
+
+options(digits = 3, width = 120,
+        dplyr.summarise.inform = FALSE,
+        knitr.kable.NA = "")
+```
+
+```{r load-libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(brms)
+library(bayesim)
+library(bayeshear)
+library(patchwork)
+library(tidybayes)
+library(future)
+library(SBC)
+library(posterior)
+
+set.seed(671126974)
+plan(multisession)
+options(brms.backend = "cmdstanr")
+options(SBC.min_chunk_size = 5)
+cache_dir <- "../_brms_SBC_cache"
+```
+
+```{r settings}
+SBC_DSN = 200
+N_PRE = 20
+N_SBC = 20
+K = 15
+```
+
+```{r create-precon-data}
+precon_ds <- function(N, K){
+  beta <- rep(1, K)
+  alpha <- 3
+  X <- matrix(rnorm(N * K), N, K)
+  eta <- alpha + X %*% beta
+  mu <- exp(eta)
+  
+  shape <- 1
+  scale <- mu / shape
+  y <- rgamma(N, shape = shape, scale = scale)
+  hist(y)
+  
+  precondition_sample <- as.data.frame(cbind(y, X))
+  return(precondition_sample)
+}
+
+```
+
+```{r create-precon-data}
+
+df <- precon_ds(N = N_PRE, K = K)
+
+empty <- brm(bf(y ~ ., center = FALSE), 
+             data = df, family = Gamma("log"),
+             prior = prior(normal(0, 100), class = "b") +
+               prior(normal(0, 100), class = "b", coef = "Intercept") +
+               prior(gamma(0.001, 0.001), class = "shape"),
+             chains = 1, sample_prior = "only")
+pp_check(empty)
+
+set.seed(1234)
+ranks <- matrix(nrow = SBC_DSN, ncol = K + 2)
+colnames(ranks) <- c(paste0("b_", 0:K), "shape")
+for (i in 1:SBC_DSN) {
+  print(i)
+  beta <- rnorm(K, 0, 1)
+  alpha <- rnorm(1, 2, 2)
+  X <- matrix(rnorm(n * K), n, K)
+  y <- rep(1, n)
+  data <- as.data.frame(cbind(y, X))
+  
+  index <- sample.int(post_warmup_samples(fit), size = 1)
+  dataset <- forward_sampling(
+    fit,
+    index,
+    n,
+    data,
+    ...)
+  dataset$y <- ifelse(dataset$y < 10e-15, 10e-15, dataset$y)
+  
+  pars <- as_draws_df(fit)[index,]
+  attr(pars, "draws_df") = NULL
+  pars <-   pars[ , -which(
+    names(
+      pars <- as_draws_df(fit)
+      ) %in% c(".chain",".iteration", ".draw"))]
+  
+  list(
+    variables = pars,
+    generated = rbind(precon_sample[,colnames(dataset)], dataset)
+  )
+  
+  df <- as.data.frame(cbind(y, X))
+  fit <- update(empty, newdata = df, chains = 1, silent = 2)
+  ps <- as.matrix(fit, variable = c("^b_", "shape"), regex = TRUE)
+  ranks[i, ] <- colSums(sweep(ps, 2, c(alpha, beta, shape), "<"))
+}
+
+# apply(ranks, 2, hist)
+
+ranks_df <- ranks %>%
+  as.data.frame() %>%
+  mutate(dataset_id=seq_len(n())) %>%
+  gather(key = "parameter", value="rank", -dataset_id)
+
+plot_ecdf_diff(ranks_df, max_rank=1000)
+```
