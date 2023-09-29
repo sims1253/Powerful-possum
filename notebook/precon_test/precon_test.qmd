@@ -126,7 +126,7 @@ SBC <- function(gen_fit, sbc_fit, n_sbc, SBC_DSN, precon_sample = NULL, ...){
 
 ```
 
-```{r run}
+```{r wide_prior}
 SBC_DSN = 100
 N_PRE = 50
 N_SBC = 50
@@ -138,6 +138,49 @@ wide_prior <-  prior(normal(0, 100), class = "b") +
                prior(normal(2, 100), class = "b", coef = "Intercept") +
                prior(gamma(0.001, 0.001), class = "shape")
 
+# prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
+#                   data = precon_data,
+#                   family = Gamma("log"),
+#                   prior = wide_prior,
+#                   cores = 4,
+#                   sample_prior = "only",
+#                   silent = 2,
+#                   refresh = 0,
+#                   init_r = 0.1
+#                   )
+# pp_check(prior_only_fit)
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = wide_prior,
+                  cores = 4,
+                  silent = 2,
+                  refresh = 0,
+                  init = 0.1
+                  )
+pp_check(precon_fit)
+
+# Fails to innitiate
+#vanilla_sbc_df <- SBC(gen_fit = prior_only_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN)
+
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data)
+
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN)
+
+#plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+```
+
+```{r narrow_prior}
+SBC_DSN = 100
+N_PRE = 200
+N_SBC = 20
+K = 15
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
 narrow_prior <-  prior(normal(0, 1), class = "b") +
                prior(normal(2, 2), class = "b", coef = "Intercept") +
                prior(gamma(1, 1), class = "shape")
@@ -145,7 +188,7 @@ narrow_prior <-  prior(normal(0, 1), class = "b") +
 prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
                   data = precon_data,
                   family = Gamma("log"),
-                  prior = wide_prior,
+                  prior = narrow_prior,
                   cores = 4,
                   sample_prior = "only",
                   silent = 2,
@@ -157,7 +200,7 @@ pp_check(prior_only_fit)
 precon_fit <- brm(bf(y ~ ., center = FALSE), 
                   data = precon_data,
                   family = Gamma("log"),
-                  prior = wide_prior,
+                  prior = narrow_prior,
                   cores = 4,
                   silent = 2,
                   refresh = 0,
