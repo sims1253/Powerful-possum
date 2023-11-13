@@ -12,8 +12,6 @@ format:
     anchor-sections: true
 ---
 
-# Setup
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
                       fig.width = 6, fig.height = (6 * 0.618),
@@ -24,6 +22,8 @@ options(digits = 3, width = 120,
         dplyr.summarise.inform = FALSE,
         knitr.kable.NA = "")
 ```
+
+# Setup
 
 ```{r load-libraries, warning=FALSE, message=FALSE}
 library(tidyverse)
@@ -37,142 +37,106 @@ library(doFuture)
 plan(multisession, workers = 12)
 
 set.seed(671126974)
-
 ```
 
-```{r create-precon-data}
-precon_ds <- function(N, K){
+```{r, custom-functions}
+precon_ds <- function(N, K) {
   beta <- rep(1, K)
   alpha <- 3
   X <- matrix(rnorm(N * K), N, K)
   eta <- alpha + X %*% beta
   mu <- exp(eta)
-  
   shape <- 1
   scale <- mu / shape
-  #y <- rgamma(N, shape = shape, scale = scale)
   y <- as.vector(rfrechet(N, shape = shape, scale = scale))
-  #hist(y)
-  
-  precondition_sample <- as.data.frame(cbind(y, X))
-  return(precondition_sample)
+
+  return(as.data.frame(cbind(y, X)))
 }
 
-```
-
-```{r homebrew-sbc}
-SBC <- function(gen_fit, sbc_fit, n_sbc, SBC_DSN, precon_sample = NULL, ...){
-  pars <- c(
-    colnames(as_draws_df(gen_fit))[
-    !names(as_draws_df(gen_fit)) %in% c(".chain",".iteration", ".draw")],
-    "loglik"
-  )
-  variables <- all.vars(gen_fit$formula$formula)
-  
-  ranks <- as.data.frame(matrix(nrow = SBC_DSN, ncol = length(pars)))
-  colnames(ranks) <- pars
-  
- results <- foreach(i = seq(SBC_DSN), .options.future = list(seed = TRUE)) %dofuture% {
- # for (i in seq_along(results)) {
-    index <- sample.int(post_warmup_samples(gen_fit), size = 1)
-    dataset <- data.frame(matrix(rnorm(n_sbc * length(variables)),
+ds_gen <- function(n_sbc, gen_fit) {
+  variable_names <- all.vars(gen_fit$formula$formula)
+  dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names)),
       nrow = n_sbc,
-      ncol = length(variables)
+      ncol = length(variable_names)
     ))
-    colnames(dataset) <- variables
+    colnames(dataset) <- variable_names
+    return(dataset)
+}
+
+SBC <- function(gen_fit,
+                sbc_fit,
+                n_sbc,
+                SBC_DSN,
+                precon_sample = NULL,
+                lb = NULL,
+                ub = NULL,
+                ppred_data_gen,
+                ...) {
+  model_parameters <- c(variables(gen_fit), "loglik")
+  variable_names <- all.vars(gen_fit$formula$formula)
+
+  ranks <- as.data.frame(matrix(nrow = SBC_DSN, ncol = length(model_parameters)))
+  colnames(ranks) <- model_parameters
+
+  results <- foreach(
+    i = seq(SBC_DSN),
+    .options.future = list(seed = TRUE)) %dofuture% {
+    # for (i in seq_along(results)) { # for debug purposes
+    index <- sample.int(ndraws(gen_fit), size = 1)
+    dataset <- ppred_data_gen(n_sbc, gen_fit)
+    # TODO this has to be replaced by the inverse forward sampling function
     dataset$y <- as.vector(
       brms::posterior_predict(gen_fit,
         newdata = dataset,
-        draw_ids = index,
-        silent = 2,
-        refresh = 0
+        draw_ids = index
       )
     )
 
-    dataset$y <- ifelse(dataset$y < 10e-12, 10e-12, dataset$y)
-    
-    true_pars <- as.data.frame(as_draws_matrix(gen_fit)[index,])
-    true_ll <- sum(log_lik(gen_fit, dataset, draw_ids = index))
-    
-    if(!is.null(precon_sample)){
-      dataset <- rbind(precon_sample, dataset)
+    # Truncate in case of numerical instabilities
+    if(!is.null(lb)){
+      dataset$y <- ifelse(dataset$y < lb, lb, dataset$y)
+    }
+    if(!is.null(ub)){
+      dataset$y <- ifelse(dataset$y < ub, ub, dataset$y)
     }
     
+    # Collect true parameters for SBC rank comparison
+    true_pars <- as.data.frame(as_draws_matrix(gen_fit)[index, ])
+    true_ll <- sum(log_lik(gen_fit, dataset, draw_ids = index))
+  
+    # Add the precon sample to the dataset if provided
+    if (!is.null(precon_sample)) {
+      dataset <- rbind(precon_sample, dataset)
+    }
+
     fit <- update(sbc_fit, newdata = dataset, chains = 1, refresh = 0, silent = 2, init_r = 0.1)
     fit_pars <- as.data.frame(as_draws_matrix(fit))
     fit_ll <- rowSums(log_lik(fit, dataset))
-    
-    tmp <- vector(mode = "numeric", length = length(pars))
-    names(tmp) <- pars
-    for (name in colnames(fit_pars)){
+
+    tmp <- vector(mode = "numeric", length = length(model_parameters))
+    names(tmp) <- model_parameters
+    for (name in colnames(fit_pars)) {
       tmp[[name]] <- sum(fit_pars[[name]] < true_pars[[name]])
     }
     tmp[["loglik"]] <- sum(fit_ll < true_ll)
     tmp
-    #ranks[i, ] <- tmp
-    }
-  
+    # ranks[i, ] <- tmp
+  }
+
   for (i in seq_along(results)) {
     ranks[i, ] <- results[[i]]
   }
-  
- 
- ranks_df <- ranks %>%
-  mutate(sim_id=seq_len(n())) %>%
-  gather(key = "variable", value="rank", -sim_id)
- 
- return(ranks_df)
+
+
+  ranks_df <- ranks %>%
+    mutate(sim_id = seq_len(n())) %>%
+    gather(key = "variable", value = "rank", -sim_id)
+
+  return(ranks_df)
 }
-
 ```
 
-```{r wide_prior}
-SBC_DSN = 100
-N_PRE = 50
-N_SBC = 50
-K = 15
-
-precon_data <- precon_ds(N = N_PRE, K = K)
-
-wide_prior <-  prior(normal(0, 100), class = "b") +
-               prior(normal(2, 100), class = "b", coef = "Intercept") +
-               prior(gamma(0.001, 0.001), class = "shape")
-
-# prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
-#                   data = precon_data,
-#                   family = Gamma("log"),
-#                   prior = wide_prior,
-#                   cores = 4,
-#                   sample_prior = "only",
-#                   silent = 2,
-#                   refresh = 0,
-#                   init_r = 0.1
-#                   )
-# pp_check(prior_only_fit)
-
-precon_fit <- brm(bf(y ~ ., center = FALSE), 
-                  data = precon_data,
-                  family = Gamma("log"),
-                  prior = wide_prior,
-                  cores = 4,
-                  silent = 2,
-                  refresh = 0,
-                  init = 0.1
-                  )
-pp_check(precon_fit)
-
-# Fails to innitiate
-#vanilla_sbc_df <- SBC(gen_fit = prior_only_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN)
-
-with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data)
-
-without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN)
-
-#plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
-plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
-plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
-```
-
+#  Narrow Prior
 ```{r narrow_prior}
 SBC_DSN = 100
 N_PRE = 200
@@ -208,13 +172,79 @@ precon_fit <- brm(bf(y ~ ., center = FALSE),
                   )
 pp_check(precon_fit)
 
-vanilla_sbc_df <- SBC(gen_fit = prior_only_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN)
+vanilla_sbc_df <- SBC(gen_fit = prior_only_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
 
-with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data)
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e12, ppred_data_gen = ds_gen)
 
-without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN)
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
 
 plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+```
+
+# Wide Prior
+
+```{r wide_prior}
+SBC_DSN = 100
+N_PRE = 50
+N_SBC = 50
+K = 15
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
+wide_prior <-  prior(normal(0, 100), class = "b") +
+               prior(normal(2, 100), class = "b", coef = "Intercept") +
+               prior(gamma(0.001, 0.001), class = "shape")
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = wide_prior,
+                  cores = 4,
+                  silent = 2,
+                  refresh = 0,
+                  init = 0.1
+                  )
+pp_check(precon_fit)
+
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e12, ppred_data_gen = ds_gen)
+
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
+
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+```
+
+# Flat Prior
+
+```{r flat_prior}
+SBC_DSN = 100
+N_PRE = 50
+N_SBC = 50
+K = 15
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
+flat_prior <-  prior("", class = "b") +
+               prior("", class = "b", coef = "Intercept") +
+               prior("", class = "shape")
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = flat_prior,
+                  cores = 4,
+                  silent = 2,
+                  refresh = 0,
+                  init = 0.1
+                  )
+pp_check(precon_fit)
+
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e12, ppred_data_gen = ds_gen)
+
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
+
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
 plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
 ```
