@@ -56,11 +56,11 @@ precon_ds <- function(N, K) {
 ds_gen <- function(n_sbc, gen_fit) {
   variable_names <- all.vars(gen_fit$formula$formula)
   dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names)),
-      nrow = n_sbc,
-      ncol = length(variable_names)
-    ))
-    colnames(dataset) <- variable_names
-    return(dataset)
+    nrow = n_sbc,
+    ncol = length(variable_names)
+  ))
+  colnames(dataset) <- variable_names
+  return(dataset)
 }
 
 SBC <- function(gen_fit,
@@ -80,7 +80,8 @@ SBC <- function(gen_fit,
 
   results <- foreach(
     i = seq(SBC_DSN),
-    .options.future = list(seed = TRUE)) %dofuture% {
+    .options.future = list(seed = TRUE)
+  ) %dofuture% {
     # for (i in seq_along(results)) { # for debug purposes
     index <- sample.int(ndraws(gen_fit), size = 1)
     dataset <- ppred_data_gen(n_sbc, gen_fit)
@@ -93,26 +94,36 @@ SBC <- function(gen_fit,
     )
 
     # Truncate in case of numerical instabilities
-    if(!is.null(lb)){
+    if (!is.null(lb)) {
       dataset$y <- ifelse(dataset$y < lb, lb, dataset$y)
     }
-    if(!is.null(ub)){
+    if (!is.null(ub)) {
       dataset$y <- ifelse(dataset$y < ub, ub, dataset$y)
     }
-    
+
     # Collect true parameters for SBC rank comparison
     true_pars <- as.data.frame(as_draws_matrix(gen_fit)[index, ])
     true_ll <- sum(log_lik(gen_fit, dataset, draw_ids = index))
-  
+
+    full_data <- dataset
     # Add the precon sample to the dataset if provided
     if (!is.null(precon_sample)) {
-      dataset <- rbind(precon_sample, dataset)
+      full_data <- rbind(precon_sample, full_data)
     }
-
-    fit <- update(sbc_fit, newdata = dataset, chains = 1, refresh = 0, silent = 2, init_r = 0.1)
+    
+    # Fit model to sbc dataset and extract the model parameters and log likelihood
+    fit <- update(sbc_fit,
+      newdata = full_data,
+      chains = 1,
+      init_r = 0.1,
+      refresh = 0,
+      silent = 2
+    )
     fit_pars <- as.data.frame(as_draws_matrix(fit))
     fit_ll <- rowSums(log_lik(fit, dataset))
 
+    # Calculate the rank statistics by comparing the true parameters with the
+    # draws from the sbc fit.
     tmp <- vector(mode = "numeric", length = length(model_parameters))
     names(tmp) <- model_parameters
     for (name in colnames(fit_pars)) {
@@ -120,27 +131,27 @@ SBC <- function(gen_fit,
     }
     tmp[["loglik"]] <- sum(fit_ll < true_ll)
     tmp
-    # ranks[i, ] <- tmp
+    # ranks[i, ] <- tmp # for the serial debug version
   }
 
   for (i in seq_along(results)) {
     ranks[i, ] <- results[[i]]
   }
 
-
   ranks_df <- ranks %>%
     mutate(sim_id = seq_len(n())) %>%
-    gather(key = "variable", value = "rank", -sim_id)
+    pivot_longer(c(-sim_id), names_to = "variable", values_to = "rank")
 
   return(ranks_df)
 }
 ```
 
-#  Narrow Prior
+# Narrow Prior
+
 ```{r narrow_prior}
-SBC_DSN = 100
-N_PRE = 200
-N_SBC = 20
+SBC_DSN = 200
+N_PRE = 50
+N_SBC = 50
 K = 15
 
 precon_data <- precon_ds(N = N_PRE, K = K)
@@ -172,11 +183,11 @@ precon_fit <- brm(bf(y ~ ., center = FALSE),
                   )
 pp_check(precon_fit)
 
-vanilla_sbc_df <- SBC(gen_fit = prior_only_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
+vanilla_sbc_df <- SBC(gen_fit = prior_only_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e-12, ppred_data_gen = ds_gen)
 
-with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e12, ppred_data_gen = ds_gen)
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e-12, ppred_data_gen = ds_gen)
 
-without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e-12, ppred_data_gen = ds_gen)
 
 plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
@@ -186,9 +197,9 @@ plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
 # Wide Prior
 
 ```{r wide_prior}
-SBC_DSN = 100
-N_PRE = 50
-N_SBC = 50
+SBC_DSN = 200
+N_PRE = 40
+N_SBC = 40
 K = 15
 
 precon_data <- precon_ds(N = N_PRE, K = K)
@@ -208,9 +219,9 @@ precon_fit <- brm(bf(y ~ ., center = FALSE),
                   )
 pp_check(precon_fit)
 
-with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e12, ppred_data_gen = ds_gen)
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e-12, ppred_data_gen = ds_gen)
 
-without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e-12, ppred_data_gen = ds_gen)
 
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
 plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
@@ -219,9 +230,9 @@ plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
 # Flat Prior
 
 ```{r flat_prior}
-SBC_DSN = 100
-N_PRE = 50
-N_SBC = 50
+SBC_DSN = 200
+N_PRE = 40
+N_SBC = 40
 K = 15
 
 precon_data <- precon_ds(N = N_PRE, K = K)
@@ -241,9 +252,9 @@ precon_fit <- brm(bf(y ~ ., center = FALSE),
                   )
 pp_check(precon_fit)
 
-with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e12, ppred_data_gen = ds_gen)
+with_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, precon_sample = precon_data, lb = 1e-12, ppred_data_gen = ds_gen)
 
-without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e12, ppred_data_gen = ds_gen)
+without_precon_sbc_df <- SBC(gen_fit = precon_fit, sbc_fit = precon_fit, n_sbc = N_SBC, SBC_DSN = SBC_DSN, lb = 1e-12, ppred_data_gen = ds_gen)
 
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
 plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)

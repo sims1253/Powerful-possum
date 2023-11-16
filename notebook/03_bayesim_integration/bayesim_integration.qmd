@@ -1,0 +1,209 @@
+---
+title: "Inverse Forward Sampling Case Studies"
+author: "Maximilian Scholz"
+editor: visual
+execute: 
+  cache: true
+  autodep: true
+format:
+  html:
+    embed-resources: true
+    smooth-scroll: true
+    anchor-sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
+                      fig.width = 6, fig.height = (6 * 0.618),
+                      out.width = "80%", collapse = TRUE,
+                      dev = "png", dev.args = list(type = "cairo-png"))
+
+options(digits = 3, width = 120,
+        dplyr.summarise.inform = FALSE,
+        knitr.kable.NA = "")
+```
+
+# Setup
+
+```{r load-libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(brms)
+library(bayesim)
+library(patchwork)
+library(posterior)
+library(doFuture)
+library(purrr)
+if (.Platform$OS.type == "windows"){
+  plan(multisession, workers = 12)  
+} else {
+  plan(multicore, workers = 12)
+}
+
+
+set.seed(671126974)
+```
+
+```{r, custom-functions}
+precon_ds <- function(N, K) {
+  beta <- rep(1, K)
+  alpha <- 3
+  X <- matrix(rnorm(N * K), N, K)
+  eta <- alpha + X %*% beta
+  mu <- exp(eta)
+  shape <- 1
+  scale <- mu / shape
+  y <- as.vector(rfrechet(N, shape = shape, scale = scale))
+
+  return(as.data.frame(cbind(y, X)))
+}
+
+ds_gen <- function(n_sbc, fit, ...) {
+  variable_names <- all.vars(fit$formula$formula)
+  dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names)),
+    nrow = n_sbc,
+    ncol = length(variable_names)
+  ))
+  colnames(dataset) <- variable_names
+  return(dataset)
+}
+
+```
+
+# Narrow Prior
+
+```{r narrow_prior}
+n_sims = 200
+N_PRE = 50
+N_SBC = 50
+K = 15
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
+narrow_prior <-  prior(normal(0, 1), class = "b") +
+               prior(normal(2, 2), class = "b", coef = "Intercept") +
+               prior(gamma(1, 1), class = "shape")
+
+prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = narrow_prior,
+                  cores = 4,
+                  sample_prior = "only",
+                  silent = 2,
+                  refresh = 0,
+                  init_r = 0.1
+                  )
+pp_check(prior_only_fit)
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = narrow_prior,
+                  cores = 4,
+                  silent = 2,
+                  refresh = 0,
+                  init = 0.1
+                  )
+pp_check(precon_fit)
+
+vanilla_sbc_df <- ifs_SBC(fit = prior_only_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          precon_sample = precon_data, 
+                          lb = 1e-12)
+
+with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          precon_sample = precon_data, 
+                          lb = 1e-12)
+
+without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          lb = 1e-12)
+
+plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+```
+
+# Wide Prior
+
+```{r wide_prior}
+n_sims = 200
+N_PRE = 40
+N_SBC = 40
+K = 15
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
+wide_prior <-  prior(normal(0, 100), class = "b") +
+               prior(normal(2, 100), class = "b", coef = "Intercept") +
+               prior(gamma(0.001, 0.001), class = "shape")
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = wide_prior,
+                  cores = 4,
+                  silent = 2,
+                  refresh = 0,
+                  init = 0.1
+                  )
+pp_check(precon_fit)
+
+with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          precon_sample = precon_data, 
+                          lb = 1e-12)
+
+without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          lb = 1e-12)
+
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+```
+
+# Flat Prior
+
+```{r flat_prior}
+n_sims = 200
+N_PRE = 40
+N_SBC = 40
+K = 15
+
+precon_data <- precon_ds(N = N_PRE, K = K)
+
+flat_prior <-  prior("", class = "b") +
+               prior("", class = "b", coef = "Intercept") +
+               prior("", class = "shape")
+
+precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Gamma("log"),
+                  prior = flat_prior,
+                  cores = 4,
+                  silent = 2,
+                  refresh = 0,
+                  init = 0.1
+                  )
+pp_check(precon_fit)
+
+with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          precon_sample = precon_data, 
+                          lb = 1e-12)
+
+without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          lb = 1e-12)
+
+plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+```
