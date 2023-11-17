@@ -31,14 +31,11 @@ library(brms)
 library(bayesim)
 library(patchwork)
 library(posterior)
-library(doFuture)
 library(purrr)
-if (.Platform$OS.type == "windows"){
-  plan(multisession, workers = 12)  
-} else {
-  plan(multicore, workers = 12)
-}
+library(SBC)
 
+NCORES = 12
+plan(multisession, workers = NCORES)
 
 set.seed(671126974)
 ```
@@ -68,6 +65,7 @@ ds_gen <- function(n_sbc, fit, ...) {
 }
 
 ```
+
 
 # Narrow Prior
 
@@ -108,19 +106,19 @@ pp_check(precon_fit)
 
 vanilla_sbc_df <- ifs_SBC(fit = prior_only_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           precon_sample = precon_data, 
                           lb = 1e-12)
 
 with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           precon_sample = precon_data, 
                           lb = 1e-12)
 
 without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           lb = 1e-12)
 
 plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
@@ -155,13 +153,13 @@ pp_check(precon_fit)
 
 with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           precon_sample = precon_data, 
                           lb = 1e-12)
 
 without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           lb = 1e-12)
 
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
@@ -195,13 +193,13 @@ pp_check(precon_fit)
 
 with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           precon_sample = precon_data, 
                           lb = 1e-12)
 
 without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
-                          ppred_data_gen = partial(ds_gen, n_sbc = N_SBC),
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           lb = 1e-12)
 
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
