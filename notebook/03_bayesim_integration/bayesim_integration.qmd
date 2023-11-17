@@ -33,10 +33,13 @@ library(patchwork)
 library(posterior)
 library(doFuture)
 library(purrr)
+library(SBC)
+NCORES = 6
+
 if (.Platform$OS.type == "windows"){
-  plan(multisession, workers = 12)  
+  plan(multisession, workers = NCORES)  
 } else {
-  plan(multicore, workers = 12)
+  plan(multicore, workers = NCORES)
 }
 
 
