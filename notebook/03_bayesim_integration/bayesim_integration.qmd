@@ -14,7 +14,7 @@ format:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
-                      fig.width = 6, fig.height = (6 * 0.618),
+                      fig.width = 6, fig.height = (6 * 0.6end),
                       out.width = "80%", collapse = TRUE,
                       dev = "png", dev.args = list(type = "cairo-png"))
 
@@ -33,15 +33,17 @@ library(patchwork)
 library(posterior)
 library(purrr)
 library(SBC)
+library(future)
+library(latex2exp)
 
-NCORES = 12
+NCORES = 10
 plan(multisession, workers = NCORES)
 
 set.seed(671126974)
 ```
 
 ```{r, custom-functions}
-precon_ds <- function(N, K) {
+precon_ds_frechet <- function(N, K) {
   beta <- rep(1, K)
   alpha <- 3
   X <- matrix(rnorm(N * K), N, K)
@@ -54,18 +56,31 @@ precon_ds <- function(N, K) {
   return(as.data.frame(cbind(y, X)))
 }
 
+
+precon_ds_gamma <- function(N, K) {
+  beta <- rep(1, K)
+  alpha <- 3
+  X <- matrix(rnorm(N * K), N, K)
+  eta <- alpha + X %*% beta
+  mu <- exp(eta)
+  shape <- 1
+  scale <- mu / shape
+  y <- as.vector(rgamma(N, shape = shape, scale = scale))
+
+  return(as.data.frame(cbind(y, X)))
+}
+
+
 ds_gen <- function(n_sbc, fit, ...) {
   variable_names <- all.vars(fit$formula$formula)
-  dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names)),
+  dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names), mean = 0, sd = 1),#/length(variable_names)),
     nrow = n_sbc,
     ncol = length(variable_names)
   ))
   colnames(dataset) <- variable_names
   return(dataset)
 }
-
 ```
-
 
 # Narrow Prior
 
@@ -75,7 +90,7 @@ N_PRE = 50
 N_SBC = 50
 K = 15
 
-precon_data <- precon_ds(N = N_PRE, K = K)
+precon_data <- precon_ds_frechet(N = N_PRE, K = K)
 
 narrow_prior <-  prior(normal(0, 1), class = "b") +
                prior(normal(2, 2), class = "b", coef = "Intercept") +
@@ -134,7 +149,7 @@ N_PRE = 40
 N_SBC = 40
 K = 15
 
-precon_data <- precon_ds(N = N_PRE, K = K)
+precon_data <- precon_ds_frechet(N = N_PRE, K = K)
 
 wide_prior <-  prior(normal(0, 100), class = "b") +
                prior(normal(2, 100), class = "b", coef = "Intercept") +
@@ -174,7 +189,7 @@ N_PRE = 40
 N_SBC = 40
 K = 15
 
-precon_data <- precon_ds(N = N_PRE, K = K)
+precon_data <- precon_ds_frechet(N = N_PRE, K = K)
 
 flat_prior <-  prior("", class = "b") +
                prior("", class = "b", coef = "Intercept") +
@@ -205,3 +220,399 @@ without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
 plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
 plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
 ```
+
+# Scaling Flat
+
+```{r scaling-flat}
+n_sims = 200
+N_SBC = 100
+K = 15
+start = 13
+end = 25
+
+flat_prior <-  prior("", class = "b") +
+               prior("", class = "b", coef = "Intercept") +
+               prior("", class = "shape")
+
+log_gamma <- log(SBC:::adjust_gamma(N = 1000, L = 1))
+
+
+gamma_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = Gamma("log"),
+                    prior = flat_prior,
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  gamma_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+gamma_ranks <- lapply(gamma_sbc_results, function(x) x$ranks_df)
+gamma_gammas <- lapply(
+    gamma_ranks,
+    function(x) {
+      gamma_discrepancy(
+        filter(
+          x,
+          variable == "loglik"
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      )
+    }
+  )
+
+weibull_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = weibull("log"),
+                    prior = flat_prior,
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  weibull_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+lognormal_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = lognormal(),
+                    prior = prior("", class = "b") +
+               prior("", class = "b", coef = "Intercept") +
+               prior("", class = "sigma"),
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  lognormal_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+
+plots <- vector(mode = "list", length = length(end - start))
+flat_gamma_df <- data.frame(precon_size = start:end, gamma = rep(NA, end - start + 1), weibull = rep(NA, end - start + 1), lognormal = rep(NA, end - start + 1))
+for (i in 1:(end - start + 1)) {
+  #  plot_ecdf_diff(sbc_results[[i]]$ranks_df, max_rank=1000)
+  if (!any(is.na(gamma_sbc_results[[i]]$ranks_df$rank))) {
+    gamma_df$gamma[[i]] <- gamma_discrepancy(
+      filter(gamma_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+  if (!any(is.na(weibull_sbc_results[[i]]$ranks_df$rank))) {
+    gamma_df$weibull[[i]] <- gamma_discrepancy(
+      filter(weibull_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+  if (!any(is.na(lognormal_sbc_results[[i]]$ranks_df$rank))) {
+    gamma_df$lognormal[[i]] <- gamma_discrepancy(
+      filter(lognormal_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+} 
+
+flat_gamma_df = flat_gamma_df %>%
+  pivot_longer(!precon_size, names_to = "likelihood", values_to = "log_gamma")
+
+flat_gamma_df %>%
+  ggplot(aes(x = precon_size, y = log_gamma, color = likelihood)) + geom_line() + geom_hline(yintercept = log_gamma, linetype = 3) + xlab("Size of preconditioning sample")
+saveRDS(flat_gamma_df, "flat_gamma_df.RDS")
+```
+
+
+# Scaling Wide
+
+```{r scaling-wide}
+n_sims = 200
+N_SBC = 100
+K = 15
+start = 13
+end = 25
+
+flat_prior <-  prior(normal(0, 100), class = "b") +
+               prior(normal(2, 100), class = "b", coef = "Intercept") +
+               prior(gamma(0.001, 0.001), class = "shape")
+
+log_gamma <- log(SBC:::adjust_gamma(N = 1000, L = 1))
+
+
+gamma_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = Gamma("log"),
+                    prior = flat_prior,
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  gamma_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+gamma_ranks <- lapply(gamma_sbc_results, function(x) x$ranks_df)
+gamma_gammas <- lapply(
+    gamma_ranks,
+    function(x) {
+      gamma_discrepancy(
+        filter(
+          x,
+          variable == "loglik"
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      )
+    }
+  )
+
+weibull_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = weibull("log"),
+                    prior = flat_prior,
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  weibull_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+lognormal_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = lognormal(),
+                    prior = prior(normal(0, 100), class = "b") +
+               prior(normal(2, 100), class = "b", coef = "Intercept") +
+               prior(gamma(1, 0.01), class = "sigma"),
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  lognormal_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+
+wide_gamma_df <- data.frame(precon_size = start:end, gamma = rep(NA, end - start + 1), weibull = rep(NA, end - start + 1), lognormal = rep(NA, end - start + 1))
+for (i in 1:(end - start + 1)) {
+  #  plot_ecdf_diff(sbc_results[[i]]$ranks_df, max_rank=1000)
+  if (!any(is.na(gamma_sbc_results[[i]]$ranks_df$rank))) {
+    gamma_df$gamma[[i]] <- gamma_discrepancy(
+      filter(gamma_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+  if (!any(is.na(weibull_sbc_results[[i]]$ranks_df$rank))) {
+    gamma_df$weibull[[i]] <- gamma_discrepancy(
+      filter(weibull_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+  if (!any(is.na(lognormal_sbc_results[[i]]$ranks_df$rank))) {
+    gamma_df$lognormal[[i]] <- gamma_discrepancy(
+      filter(lognormal_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+} 
+
+wide_gamma_df = wide_gamma_df %>%
+  pivot_longer(!precon_size, names_to = "likelihood", values_to = "log_gamma")
+
+wide_gamma_df %>%
+  mutate(log_gamma = if_else(is.na(log_gamma), -10, log_gamma)) %>%
+  ggplot(aes(x = precon_size, y = log_gamma, color = likelihood)) + geom_line(position=position_jitter(w=0, h=0.15)) + geom_hline(yintercept = log_gamma, linetype = 3) + xlab("Size of preconditioning sample") +
+  scale_y_continuous(breaks = c( -10, -8, -6, -4, -2, 0), labels = c("NA", "-8", "-6", "-4", "-2", "0")) + ggtitle("Wide Prior")
+saveRDS(wide_gamma_df, "wide_gamma_df.RDS")
+```
+
+# Scaling Narrow
+
+```{r scaling-narrow}
+n_sims = 200
+N_SBC = 100
+K = 15
+start = 13
+end = 25
+
+log_gamma <- log(SBC:::adjust_gamma(N = 1000, L = 1))
+
+gamma_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = Gamma("log"),
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  gamma_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+gamma_ranks <- lapply(gamma_sbc_results, function(x) x$ranks_df)
+gamma_gammas <- lapply(
+    gamma_ranks,
+    function(x) {
+      gamma_discrepancy(
+        filter(
+          x,
+          variable == "loglik"
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      )
+    }
+  )
+
+weibull_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = weibull("log"),
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  weibull_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+lognormal_sbc_results <- vector(mode = "list", length = end - start + 1)
+for (i in start:end) {
+  precon_data <- precon_ds_gamma(N = i, K = K)
+  precon_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = lognormal(),
+                    cores = 4,
+                    silent = 2,
+                    refresh = 0,
+                    init = 0.1
+                    )
+  lognormal_sbc_results[[i - start + 1]] <- ifs_SBC(fit = precon_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            precon_sample = precon_data, 
+                            lb = 1e-12,
+                            ub = 1e300)
+}
+
+
+narrow_gamma_df <- data.frame(precon_size = start:end, gamma = rep(NA, end - start + 1), weibull = rep(NA, end - start + 1), lognormal = rep(NA, end - start + 1))
+for (i in 1:(end - start + 1)) {
+  #  plot_ecdf_diff(sbc_results[[i]]$ranks_df, max_rank=1000)
+  if (!any(is.na(gamma_sbc_results[[i]]$ranks_df$rank))) {
+    narrow_gamma_df$gamma[[i]] <- gamma_discrepancy(
+      filter(gamma_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+  if (!any(is.na(weibull_sbc_results[[i]]$ranks_df$rank))) {
+    narrow_gamma_df$weibull[[i]] <- gamma_discrepancy(
+      filter(weibull_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+  if (!any(is.na(lognormal_sbc_results[[i]]$ranks_df$rank))) {
+    narrow_gamma_df$lognormal[[i]] <- gamma_discrepancy(
+      filter(lognormal_sbc_results[[i]]$ranks_df, variable == "loglik")$rank,
+      post_warmup_draws = 1000, log = TRUE
+    )
+  }
+} 
+
+narrow_gamma_df = narrow_gamma_df %>%
+  pivot_longer(!precon_size, names_to = "likelihood", values_to = "log_gamma")
+
+narrow_gamma_df %>%
+  ggplot(aes(x = precon_size, y = log_gamma, color = likelihood)) + geom_line() + geom_hline(yintercept = log_gamma, linetype = 3) + xlab("Size of preconditioning sample")+ ggtitle("Narrow Prior") + scale_x_continuous(breaks = seq(start, end, 2))
+saveRDS(narrow_gamma_df, "narrow_gamma_df.RDS")
+```
+
+# Scaling Plot
+```{r, merged_plot}
+wide_gamma_df$prior = "Wide"
+flat_gamma_df$prior = "Flat"
+narrow_gamma_df$prior = "Weakly-informative"
+
+rbind(wide_gamma_df, narrow_gamma_df, flat_gamma_df) %>%
+  mutate(prior = factor(prior, levels = c("Flat", "Wide", "Weakly-informative"))) %>%
+  #mutate(log_gamma = if_else(is.na(log_gamma), -20, log_gamma)) %>%
+  ggplot(
+    aes(x = precon_size, y = log_gamma, color = likelihood)
+    ) +
+  geom_line() +
+  geom_hline(yintercept = log_gamma, linetype = 3) +
+  facet_wrap(~prior) +
+  scale_x_continuous(
+    breaks = seq(13,25, 2)
+  ) +
+  xlab("Size of preconditioning sample") +
+  ylab("Log-Gamma statistic") +
+  labs(color = TeX("$M_o$ likelihood")) +
+  theme(legend.position = "bottom")
+
+ggsave("scaling.pdf", width = 210, height = (297/4), units = "mm", useDingbats = TRUE)
+```
+
