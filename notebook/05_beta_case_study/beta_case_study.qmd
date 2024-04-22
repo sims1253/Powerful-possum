@@ -1,0 +1,315 @@
+---
+title: "Inverse Forward Sampling Case Studies"
+author: "Maximilian Scholz"
+editor: visual
+execute: 
+  cache: true
+  autodep: true
+format:
+  html:
+    embed-resources: true
+    smooth-scroll: true
+    anchor-sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
+                      fig.width = 6, fig.height = (6 * 0.6),
+                      out.width = "80%", collapse = TRUE,
+                      dev = "png", dev.args = list(type = "cairo-png"))
+
+options(digits = 3, width = 120,
+        dplyr.summarise.inform = FALSE,
+        knitr.kable.NA = "")
+```
+
+# Setup
+
+```{r load-libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(brms)
+library(bayesim)
+library(patchwork)
+library(posterior)
+library(purrr)
+library(SBC)
+library(future)
+library(latex2exp)
+library(bayesfam)
+
+NCORES = 10
+plan(multisession, workers = NCORES)
+
+set.seed(671126974)
+```
+
+```{r, custom-functions}
+precon_ds_beta <- function(N, K) {
+  beta <- rep(0.3, K)
+  alpha <- logit(0.5)
+  X <- matrix(rnorm(N * K), N, K)
+  eta <- alpha + X %*% beta
+  mu <- inv_logit_scaled(eta)
+  y <- as.vector(rbeta_mean(N, mu = mu, phi = 10))
+
+  return(as.data.frame(cbind(y, X)))
+}
+
+
+ds_gen <- function(n_sbc, fit, ...) {
+  variable_names <- all.vars(fit$formula$formula)
+  dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names), mean = 0, sd = 1),#/length(variable_names)),
+    nrow = n_sbc,
+    ncol = length(variable_names)
+  ))
+  colnames(dataset) <- variable_names
+  return(dataset)
+}
+```
+
+# Narrow Prior
+
+```{r narrow_prior}
+n_sims = 200
+N_PRE = 50
+N_SBC = 50
+K = 15
+
+precon_data <- precon_ds_beta(N = N_PRE, K = K)
+
+narrow_prior <-  prior(normal(0, 0.4), class = "b") +
+                 prior(normal(0, 1), class = "b", coef = "Intercept") +
+                 prior(gamma(2, 1), class = "phi")
+
+prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
+                  data = precon_data,
+                  family = Beta(),
+                  prior = narrow_prior,
+                  cores = 4,
+                  sample_prior = "only",
+                  silent = 2,
+                  refresh = 0,
+                  init_r = 0.1
+                  )
+pp_check(prior_only_fit)
+
+precon_fit <- update(prior_only_fit,
+                 newdata = precon_data,
+                 family = Beta(),
+                 prior = narrow_prior,
+                 cores = 4,
+                 sample_prior = "no",
+                 silent = 2,
+                 refresh = 0,
+                 init = 0.1
+                 )
+pp_check(precon_fit)
+
+vanilla_sbc_df <- ifs_SBC(fit = prior_only_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                          lb = 0,
+                          ub = 1)
+
+with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
+                          n_sims = n_sims,
+                          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                          precon_sample = precon_data, 
+                          lb = 1e-12,
+                          ub = 1 - 1e-12)
+
+plot_ecdf_diff(filter(vanilla_sbc_df$ranks_df,
+          !is.na(rank)), max_rank=1000)
+plot_ecdf_diff(with_precon_sbc_df$ranks_df, max_rank=1000)
+
+log_gamma <- log(SBC:::adjust_gamma(N = 1000, L = 1))
+gamma_discrepancy(filter(
+          vanilla_sbc_df$ranks_df,
+          variable == "loglik",
+          !is.na(rank)
+        )$rank,
+      post_warmup_draws = 1000,
+        log = TRUE
+)
+gamma_discrepancy(filter(
+          with_precon_sbc_df$ranks_df,
+          variable == "loglik"
+        )$rank,
+      post_warmup_draws = 1000,
+        log = TRUE
+)
+```
+
+# Narrow Priors scaling with K
+
+```{r narrow_prior_k_scaling}
+n_sims = 200
+N_PRE = 50
+N_SBC = 50
+prior <-  prior(normal(0, 1), class = "b") +
+          prior(normal(0, 10), class = "b", coef = "Intercept") +
+          prior(gamma(0.02, 0.01), class = "phi")
+
+log_gamma <- log(SBC:::adjust_gamma(N = 1000, L = 1))
+  
+get_gammas <- function(K, n_sims, N_PRE, N_SBC, prior, log_gamma)
+{
+  precon_data <- precon_ds_beta(N = N_PRE, K = K)
+  
+  prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
+                    data = precon_data,
+                    family = Beta(),
+                    prior = prior,
+                    cores = 4,
+                    sample_prior = "only",
+                    silent = 2,
+                    refresh = 0,
+                    init_r = 0.1
+                    )
+  
+  vanilla_sbc_df <- ifs_SBC(fit = prior_only_fit,
+                            n_sims = n_sims,
+                            ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+                            lb = 1e-16,
+                            ub = 1 - 1e-16)
+
+  with_precon_sbc_df <- ifs_SBC(
+    fit = update(prior_only_fit,
+                 newdata = precon_data,
+                 family = Beta(),
+                 prior = prior,
+                 cores = 4,
+                 sample_prior = "no",
+                 silent = 2,
+                 refresh = 0,
+                 init = 0.1
+                 ),
+    n_sims = n_sims,
+    ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+    precon_sample = precon_data, 
+    lb = 1e-16,
+    ub = 1 - 1e-16)
+  
+  return(
+    c(
+      "vanilla_gamma" = gamma_discrepancy(
+        filter(
+          vanilla_sbc_df$ranks_df,
+          variable == "loglik"
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      ),
+      "ifs_gamma" = gamma_discrepancy(
+        filter(
+          with_precon_sbc_df$ranks_df,
+          variable == "loglik"
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      )
+    )
+  )
+}
+k_list = c(1:10)
+gamma_df = data.frame(vanilla = rep(0,length(k_list)), ifs = rep(0,length(k_list)))
+for (i in seq_along(k_list))
+{
+  plan(multisession, workers = NCORES)
+  res = get_gammas(K = k_list[[i]], n_sims = n_sims, N_PRE=N_PRE, N_SBC=N_SBC, prior=prior, log_gamma=log_gamma)
+  gamma_df[i,]$vanilla = res["vanilla_gamma"]
+  gamma_df[i,]$ifs = res["ifs_gamma"]
+}
+```
+
+# Batching of preconditioning data
+
+```{r narrow_prior_k_scaling}
+n_sims <- 200
+N_PRE <- 50
+N_SBC <- 50
+K <- 15
+
+prior <-  prior(normal(0, 1), class = "b") +
+          prior(normal(0, 10), class = "b", coef = "Intercept") +
+          prior(gamma(0.02, 0.01), class = "phi")
+
+log_gamma <- log(SBC:::adjust_gamma(N = 1000, L = 1))
+
+precon_data <- precon_ds_beta(N = N_PRE, K = K)
+
+precon_fit <- brm(bf(y ~ ., center = FALSE),
+  data = precon_data,
+  family = Beta(),
+  prior = prior,
+  cores = 4,
+  silent = 2,
+  refresh = 0,
+  init_r = 0.1
+)
+
+get_gammas <- function(K, n_sims, N_PRE, N_SBC, prior, log_gamma, batchsize, precon_fit) {
+  ranks_df <- data.frame()
+
+  for (i in 1:floor(n_sims / batchsize))
+  {
+    precon_data <- precon_ds_beta(N = N_PRE, K = K)
+
+    with_precon_sbc_df <- ifs_SBC(
+      fit = update(precon_fit,
+        newdata = precon_data,
+        family = Beta(),
+        prior = prior,
+        cores = 4,
+        sample_prior = "no",
+        silent = 2,
+        refresh = 0,
+        init = 0.1
+      ),
+      n_sims = batchsize,
+      ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+      precon_sample = precon_data,
+      lb = 1e-16,
+      ub = 1 - 1e-16
+    )
+
+    ranks_df <- bind_rows(ranks_df, with_precon_sbc_df$ranks)
+  }
+
+  return(
+    c(
+      "ifs_gamma" = gamma_discrepancy(
+        filter(
+          ranks_df,
+          variable == "loglik"
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      )
+    )
+  )
+}
+
+batchsizes <- c(5, 10, 20, 50, 100, 200)
+gamma_df <- data.frame(
+  ifs = rep(0, length(batchsizes)),
+  time = rep(0, length(batchsizes))
+  )
+for (i in seq_along(batchsizes))
+{
+  plan(multisession, workers = NCORES)
+  start <- Sys.time()
+  res <- get_gammas(K = K,
+                    n_sims = n_sims,
+                    N_PRE = N_PRE,
+                    N_SBC = N_SBC,
+                    prior = prior,
+                    log_gamma = log_gamma,
+                    batchsize = batchsizes[[i]],
+                    precon_fit = precon_fit)
+  gamma_df[i, ]$ifs <- res["ifs_gamma"]
+  gamma_df[i, ]$time <- as.numeric(difftime(Sys.time(), start, units = "secs"))
+}
+gamma_df$batchsize = batchsizes
+```
+

@@ -1,0 +1,383 @@
+---
+title: "Inverse Forward Sampling Case Studies"
+author: "Maximilian Scholz"
+editor: visual
+execute: 
+  cache: true
+  autodep: true
+format:
+  html:
+    embed-resources: true
+    smooth-scroll: true
+    anchor-sections: true
+---
+
+# Setup
+
+```{r, load-libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(brms)
+library(bayesim)
+library(patchwork)
+library(posterior)
+library(purrr)
+library(SBC)
+library(future)
+library(latex2exp)
+library(bayesfam)
+library(progress)
+library(ggdist)
+library(scico)
+
+NCORES = 10 # Potentially change this to match the number of physical cores!
+plan(multisession, workers = NCORES)
+
+set.seed(671126974)
+```
+
+# Custom functions
+
+```{r, custom-functions}
+# Simulates a preconditioning dataset
+precon_ds_gamma <- function(N, K) {
+  beta <- rep(0.1, K) #1
+  alpha <- 1 #3
+  X <- matrix(rnorm(N * K), N, K)
+  eta <- alpha + X %*% beta
+  mu <- exp(eta)
+  shape <- 1
+  scale <- mu / shape
+  y <- as.vector(rgamma(N, shape = shape, scale = scale))
+
+  return(as.data.frame(cbind(y, X)))
+}
+
+# Creates the newdata for the posterior_predict call 
+ds_gen <- function(n_sbc, fit, ...) {
+  variable_names <- all.vars(fit$formula$formula)
+  dataset <- data.frame(matrix(rnorm(n_sbc * length(variable_names), mean = 0, sd = 1),#/length(variable_names)),
+    nrow = n_sbc,
+    ncol = length(variable_names)
+  ))
+  colnames(dataset) <- variable_names
+  return(dataset)
+}
+```
+
+
+# Very Weakly-informative Prios
+
+```{r, very-weakly-informative-prior}
+plan(multisession, workers = NCORES)
+n_sims <- 200
+N_PRE <- 50
+N_SBC <- 50
+K <- 15
+
+
+prior <- prior(normal(0, 1), class = "b") +
+         prior(normal(2, 5), class = "b", coef = "Intercept") +
+         prior(gamma(0.1, 0.1), class = "shape")
+
+precon_data <- precon_ds_gamma(N = N_PRE, K = K)
+
+prior_only_fit <- brm(bf(y ~ ., center = FALSE),
+  data = precon_data,
+  family = Gamma("log"),
+  prior = prior,
+  cores = 4,
+  sample_prior = "only",
+  silent = 2,
+  refresh = 0
+)
+
+vanilla_sbc_df <- ifs_SBC(
+  fit = prior_only_fit,
+  n_sims = n_sims,
+  ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+  lb = 1e-15,
+  ub = Inf,
+  truncate = TRUE
+)
+p_vanilla = plot_ecdf_diff(
+  filter(
+    vanilla_sbc_df$ranks_df,
+    variable %in% c("b_Intercept", "b_V2", "b_V3", "b_V4", "loglik", "shape")
+  ),
+  max_rank = 1000
+  )
+
+with_precon_sbc_df <- ifs_SBC(
+  fit = update(prior_only_fit,
+    newdata = precon_data,
+    family = Gamma("log"),
+    prior = prior,
+    cores = 4,
+    sample_prior = "no",
+    silent = 2,
+    refresh = 0,
+    init = 0.1
+  ),
+  n_sims = n_sims,
+  ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+  precon_sample = precon_data,
+  lb = 1e-15,
+  ub = Inf,
+  truncate = TRUE
+)
+p_ifs = plot_ecdf_diff(
+   filter(
+    with_precon_sbc_df$ranks_df,
+    variable %in% c("b_Intercept", "b_V2", "b_V3", "b_V4", "loglik", "shape")
+  ),
+  max_rank = 1000)
+
+gamma_discrepancy(
+      filter(
+        vanilla_sbc_df$ranks_df,
+        variable == "loglik"
+      )$rank,
+      post_warmup_draws = 1000,
+      log = TRUE
+    )
+  
+gamma_discrepancy(
+      filter(
+        with_precon_sbc_df$ranks_df,
+        variable == "loglik"
+      )$rank,
+      post_warmup_draws = 1000,
+      log = TRUE
+    )
+
+(p_vanilla +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+   theme_bw(base_size = 12) +
+    ggtitle("Traditional SBC") +
+    theme(strip.text.x = element_text(size = 8),
+         strip.text.y = element_text(size = 8),
+         axis.ticks.y = element_blank(),
+         axis.text.y = element_blank(),
+         axis.ticks.x = element_blank(),
+         axis.text.x = element_blank())) +
+(p_ifs +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+   theme_bw(base_size = 12) +
+   ggtitle("IFS Assisted SBC")+
+   theme(strip.text.x = element_text(size = 8),
+         strip.text.y = element_text(size = 8),
+         axis.ticks.y = element_blank(),
+         axis.text.y = element_blank(),
+         axis.ticks.x = element_blank(),
+         axis.text.x = element_blank())) + plot_layout(guides = "collect")  
+   
+
+ggsave("ecdf_plots_gamma_case.pdf", width = 210, height = (297 / 4), units = "mm", useDingbats = TRUE)
+```
+
+# Likelihood, Precon-Size, prior Scaling
+
+```{r, all-scaling}
+plan(multisession, workers = NCORES)
+# plan(sequential)
+n_sims <- 200
+N_PRE_list <- c(5, 10, 15, 16, 17, 18)
+N_SBC <- 50
+K <- 15
+REPLICATIONS <- 16
+ds_gen_list <- list(
+  "gamma" = precon_ds_gamma
+)
+
+# Roughly based on https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations
+prior_list <- list(
+  "weakly-informative" = prior(normal(0, 1), class = "b") +
+    prior(normal(2, 1), class = "b", coef = "Intercept") +
+    prior(gamma(1, 1), class = "shape"),
+  "very-weakly-informative" = prior(normal(0, 1), class = "b") +
+    prior(normal(2, 5), class = "b", coef = "Intercept") +
+    prior(gamma(0.1, 0.1), class = "shape"),
+  "vague" = prior(normal(0, 100), class = "b") +
+    prior(normal(2, 100), class = "b", coef = "Intercept") +
+    prior(gamma(0.01, 0.01), class = "shape"),
+  "flat" = prior("", class = "b") +
+    prior("", class = "b", coef = "Intercept") +
+    prior("", class = "shape")
+)
+
+
+ifs_result_df <- tibble()
+vanilla_result_df <- tibble()
+
+pb <- progress_bar$new(
+  format = "[:bar] :current/:total in :elapsedfull (eta: :eta)",
+  total = length(N_PRE_list) * length(ds_gen_list) * length(prior_list) * REPLICATIONS
+)
+pb$tick(0)
+
+for (r in seq_len(REPLICATIONS)){
+  for (p in seq_along(prior_list))
+  {
+    loop_prior <- prior_list[[p]]
+  
+    if (names(prior_list)[[p]] != "flat") {
+      prior_only_fit <- brm(bf(y ~ ., center = FALSE),
+        data = precon_ds_gamma(N = 50, K = 15),
+        family = Gamma("log"),
+        prior = loop_prior,
+        cores = 4,
+        sample_prior = "only",
+        silent = 2,
+        refresh = 0,
+        init_r = 0.1
+      )
+  
+      vanilla_sbc_df <- ifs_SBC(
+        fit = prior_only_fit,
+        n_sims = n_sims,
+        ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+        lb = 1e-15,
+        ub = 1e300,
+        truncate = TRUE
+      )
+      
+      for (key_variable in unique(vanilla_sbc_df$ranks_df$variable))
+      {
+        vanilla_result_df <- bind_rows(
+          vanilla_result_df,
+          list(
+            sbc_version = "vanilla",
+            variable = key_variable,
+            log_gamma_score = gamma_discrepancy(
+              filter(
+                vanilla_sbc_df$ranks_df,
+                variable == key_variable
+              )$rank,
+              post_warmup_draws = 1000,
+              log = TRUE
+            ),
+            prior_version = names(prior_list)[[p]],
+            ranks_df = list(vanilla_sbc_df$ranks_df)
+          )
+        )
+      }
+    }
+  
+    for (i in seq_along(N_PRE_list))
+    {
+      N_PRE <- N_PRE_list[[i]]
+      for (j in seq_along(ds_gen_list))
+      {
+        pb$tick()
+        plan(multisession, workers = NCORES)
+  
+        precon_data <- ds_gen_list[[j]](N = N_PRE, K = K)
+  
+        if (names(prior_list)[[p]] != "flat") {
+          ifs_fit <- update(prior_only_fit,
+            newdata = precon_data,
+            family = Gamma("log"),
+            prior = loop_prior,
+            cores = 4,
+            sample_prior = "no",
+            silent = 2,
+            refresh = 0,
+            init = 0.1
+          )
+  
+        } else {
+          ifs_fit <- brm(bf(y ~ ., center = FALSE),
+            data = precon_data,
+            family = Gamma("log"),
+            prior = loop_prior,
+            cores = 4,
+            silent = 2,
+            refresh = 0,
+            init_r = 0.1
+          )
+        }
+        with_precon_sbc_df <- ifs_SBC(
+          ifs_fit,
+          n_sims = n_sims,
+          ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+          precon_sample = precon_data,
+          lb = 1e-15,
+          ub = 1e300,
+          truncate = TRUE
+        )
+  
+        for (key_variable in unique(vanilla_sbc_df$ranks_df$variable))
+        {
+          ifs_result_df <- bind_rows(
+            ifs_result_df,
+            list(
+              precon_size = N_PRE,
+              precon_likelihood = names(ds_gen_list)[[j]],
+              sbc_version = "ifs",
+              variable = key_variable,
+              log_gamma_score = gamma_discrepancy(
+                filter(
+                  with_precon_sbc_df$ranks_df,
+                  variable == key_variable
+                )$rank,
+                post_warmup_draws = 1000,
+                log = TRUE
+              ),
+              prior_version = names(prior_list)[[p]],
+              ranks_df = list(vanilla_sbc_df$ranks_df)
+            )
+          )
+        }
+      }
+    }
+  }
+}
+
+padded_vanilla_df <- expand_grid(vanilla_result_df, data.frame(precon_size = N_PRE_list))
+
+bind_rows(padded_vanilla_df, ifs_result_df) |>
+  mutate(
+    prior_version = case_when(
+      prior_version == "flat" ~ "Flat",
+      prior_version == "vague" ~ "Vague",
+      prior_version == "very-weakly-informative" ~ "Very weakly-informative",
+      prior_version == "weakly-informative" ~ "Weakly-informative"
+      ),
+    sbc_version = case_when(
+      sbc_version == "ifs" ~ "IFS",
+      sbc_version == "vanilla" ~ "Vanilla"
+    ),
+    precon_size = as.factor(precon_size)
+  )|>
+  mutate(
+    prior_version = factor(prior_version, levels = c(
+    "Flat", "Vague", "Very weakly-informative", "Weakly-informative"
+    )
+    )
+  )|>
+  ggplot(aes(x = precon_size, y = log_gamma_score)) +
+  stat_pointinterval(aes(color = sbc_version),
+                     position = position_dodge(width = 0.6),
+                      .width = c(0.66, 0.90),
+                     fatten_point = 1) +
+  scale_size_continuous(range = c(1, 4))+
+  facet_grid(~prior_version) +
+  theme_bw() +
+  geom_hline(yintercept = log(SBC:::adjust_gamma(N = 1000, L = 1))) +
+  scale_y_continuous(trans = "pseudo_log", breaks = c(0, -10, -100, -1000)) +
+  theme_bw(base_size = 12) +
+  theme(strip.text.x = element_text(size = 9),
+        strip.text.y = element_text(size = 9),
+        axis.ticks.y = element_blank()) +
+  xlab("Preconditioning Sample Size") +
+  ylab("Log-Gamma Score") +
+  labs(color = "SBC Version") +
+  scale_color_manual(values = c('#4477AA', '#EE6677'))
+
+ggsave("gamma_case.pdf", width = 210, height = (297 / 4), units = "mm", useDingbats = TRUE)
+
+bind_rows(padded_vanilla_df, ifs_result_df) |>
+  saveRDS(file = "results.RDS")
+```
+
+# END

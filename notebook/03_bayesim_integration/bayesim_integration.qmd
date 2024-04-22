@@ -14,7 +14,7 @@ format:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(fig.align = "center", fig.retina = 3,
-                      fig.width = 6, fig.height = (6 * 0.6end),
+                      fig.width = 6, fig.height = (6 * 0.6),
                       out.width = "80%", collapse = TRUE,
                       dev = "png", dev.args = list(type = "cairo-png"))
 
@@ -90,10 +90,10 @@ N_PRE = 50
 N_SBC = 50
 K = 15
 
-precon_data <- precon_ds_frechet(N = N_PRE, K = K)
+precon_data <- precon_ds_gamma(N = N_PRE, K = K)
 
 narrow_prior <-  prior(normal(0, 1), class = "b") +
-               prior(normal(2, 2), class = "b", coef = "Intercept") +
+               prior(normal(0, 1), class = "b", coef = "Intercept") +
                prior(gamma(1, 1), class = "shape")
 
 prior_only_fit <- brm(bf(y ~ ., center = FALSE), 
@@ -108,11 +108,12 @@ prior_only_fit <- brm(bf(y ~ ., center = FALSE),
                   )
 pp_check(prior_only_fit)
 
-precon_fit <- brm(bf(y ~ ., center = FALSE), 
-                  data = precon_data,
+precon_fit <- update(prior_only_fit, 
+                  newdata = precon_data,
                   family = Gamma("log"),
                   prior = narrow_prior,
                   cores = 4,
+                  sample_prior = "no",
                   silent = 2,
                   refresh = 0,
                   init = 0.1
@@ -122,23 +123,49 @@ pp_check(precon_fit)
 vanilla_sbc_df <- ifs_SBC(fit = prior_only_fit,
                           n_sims = n_sims,
                           ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
-                          precon_sample = precon_data, 
-                          lb = 1e-12)
+                          lb = 1e-12,
+                          ub = 1e300)
 
 with_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
                           ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
                           precon_sample = precon_data, 
-                          lb = 1e-12)
+                          lb = 1e-12,
+                          ub = 1e300)
 
 without_precon_sbc_df <- ifs_SBC(fit = precon_fit,
                           n_sims = n_sims,
                           ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
-                          lb = 1e-12)
+                          lb = 1e-12,
+                          ub = 1e300)
 
-plot_ecdf_diff(vanilla_sbc_df, max_rank=1000)
-plot_ecdf_diff(with_precon_sbc_df, max_rank=1000)
-plot_ecdf_diff(without_precon_sbc_df, max_rank=1000)
+plot_ecdf_diff(vanilla_sbc_df$ranks_df, max_rank=1000)
+plot_ecdf_diff(with_precon_sbc_df$ranks_df, max_rank=1000)
+plot_ecdf_diff(without_precon_sbc_df$ranks_df, max_rank=1000)
+
+gamma_discrepancy(filter(
+          vanilla_sbc_df$ranks_df,
+          variable == "loglik"
+        )$rank,
+      post_warmup_draws = 1000,
+        log = TRUE
+)
+
+gamma_discrepancy(filter(
+          with_precon_sbc_df$ranks_df,
+          variable == "loglik"
+        )$rank,
+      post_warmup_draws = 1000,
+        log = TRUE
+)
+
+gamma_discrepancy(filter(
+          without_precon_sbc_df$ranks_df,
+          variable == "loglik"
+        )$rank,
+      post_warmup_draws = 1000,
+        log = TRUE
+)
 ```
 
 # Wide Prior
@@ -346,7 +373,6 @@ flat_gamma_df %>%
   ggplot(aes(x = precon_size, y = log_gamma, color = likelihood)) + geom_line() + geom_hline(yintercept = log_gamma, linetype = 3) + xlab("Size of preconditioning sample")
 saveRDS(flat_gamma_df, "flat_gamma_df.RDS")
 ```
-
 
 # Scaling Wide
 
@@ -591,6 +617,7 @@ saveRDS(narrow_gamma_df, "narrow_gamma_df.RDS")
 ```
 
 # Scaling Plot
+
 ```{r, merged_plot}
 wide_gamma_df$prior = "Wide"
 flat_gamma_df$prior = "Flat"
@@ -615,4 +642,3 @@ rbind(wide_gamma_df, narrow_gamma_df, flat_gamma_df) %>%
 
 ggsave("scaling.pdf", width = 210, height = (297/4), units = "mm", useDingbats = TRUE)
 ```
-
