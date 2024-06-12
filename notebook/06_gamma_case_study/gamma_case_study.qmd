@@ -15,7 +15,6 @@ format:
 # Setup
 
 ```{r, load-libraries, warning=FALSE, message=FALSE}
-library(caret)
 library(tidyverse)
 library(brms)
 library(bayesim)
@@ -29,8 +28,12 @@ library(bayesfam)
 library(progress)
 library(ggdist)
 library(scico)
+library(bayesplot)
+library(ellipse)
+library(plyr)
+library(mvtnorm)
 
-NCORES = 10 # Potentially change this to match the number of physical cores!
+NCORES = 12 # Potentially change this to match the number of physical cores!
 plan(multisession, workers = NCORES)
 
 set.seed(671126974)
@@ -39,6 +42,24 @@ set.seed(671126974)
 # Custom functions
 
 ```{r, custom-functions}
+df <- read.table("bodyfat.txt", header = T, sep = ";")
+pred <- c("age", "weight", "height", "neck", "chest", "abdomen", "hip", 
+          "thigh", "knee", "ankle", "biceps", "forearm", "wrist")
+target <- "siri"
+full_precon_data <- df[,c(pred, target)]
+full_precon_data <- full_precon_data %>%
+  filter(siri > 0)
+names(full_precon_data) = c('V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10', 'V11', 'V12', 'V13', 'V14', "y")
+
+precon_ds_bodyfat <- function(N, K) {
+  stopifnot(N<=250 & K <= 13)
+  rows = sample(1:250, N)
+  data = data.frame(y = full_precon_data$y[rows])
+  data = cbind(data,
+               full_precon_data[rows, c('V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10', 'V11', 'V12', 'V13', 'V14')[sample(1:13, K)]])
+  return(data)
+}
+
 # Simulates a preconditioning dataset
 precon_ds_gamma <- function(N, K) {
   beta <- rep(0.1, K) #1
@@ -53,15 +74,6 @@ precon_ds_gamma <- function(N, K) {
   return(as.data.frame(cbind(y, X)))
 }
 
-precon_ds_trecator <- function(N, K) {
-  stopifnot(N<=215 & K <= 100)
-  data(tecator)
-  data = data.frame(y = endpoints[,sample(1:3, 1)])
-  data = cbind(data, absorp[,sample(1:100, K)])
-  names(data) <- c("y", lapply(2:16, function(x) paste0("V",x)))
-  return(data[sample(1:215, N),])
-}
-
 # Creates the newdata for the posterior_predict call 
 ds_gen <- function(n_sbc, fit, ...) {
   variable_names <- all.vars(fit$formula$formula)
@@ -74,15 +86,14 @@ ds_gen <- function(n_sbc, fit, ...) {
 }
 ```
 
-
 # Very Weakly-informative Prios
 
 ```{r, very-weakly-informative-prior}
 plan(multisession, workers = NCORES)
 n_sims <- 200
-N_PRE <- 50
+N_PRE <- 15
 N_SBC <- 50
-K <- 15
+K <- 13
 
 
 prior <- prior(normal(0, 1), class = "b") +
@@ -90,7 +101,9 @@ prior <- prior(normal(0, 1), class = "b") +
          prior(gamma(0.1, 0.1), class = "shape")
 
 #precon_data <- precon_ds_gamma(N = N_PRE, K = K)
-precon_data <- precon_ds_trecator(N = N_PRE, K = K)
+#precon_data <- precon_ds_trecator(N = N_PRE, K = K)
+# precon_data <- precon_ds_earnings(N = N_PRE, K = K)
+precon_data <- precon_ds_bodyfat(N = N_PRE, K = K)
 
 prior_only_fit <- brm(bf(y ~ ., center = FALSE),
   data = precon_data,
@@ -106,14 +119,14 @@ vanilla_sbc_df_t1 <- ifs_SBC(
   fit = prior_only_fit,
   n_sims = n_sims,
   ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
-  lb = 1e-15,
+  lb = 1e-16,
   ub = Inf,
   truncate = TRUE
 )
 p_vanilla_t1 = plot_ecdf_diff(
   filter(
     vanilla_sbc_df_t1$ranks_df,
-    variable %in% c("b_Intercept", "b_V2", "b_V3", "b_V4", "loglik", "shape")
+    variable %in% c("b_Intercept", "b_age", "b_hip", "b_thigh", "loglik", "shape")
   ),
   max_rank = 1000
   )
@@ -129,7 +142,7 @@ vanilla_sbc_df_t2 <- ifs_SBC(
 p_vanilla_t2 = plot_ecdf_diff(
   filter(
     vanilla_sbc_df_t2$ranks_df,
-    variable %in% c("b_Intercept", "b_V2", "b_V3", "b_V4", "loglik", "shape")
+    variable %in% c("b_Intercept", "b_age", "b_hip", "b_thigh", "loglik", "shape")
   ),
   max_rank = 1000
   )
@@ -148,14 +161,14 @@ with_precon_sbc_df <- ifs_SBC(
   n_sims = n_sims,
   ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
   precon_sample = precon_data,
-  lb = 1e-15,
+  lb = 1e-16,
   ub = Inf,
   truncate = TRUE
 )
 p_ifs = plot_ecdf_diff(
    filter(
     with_precon_sbc_df$ranks_df,
-    variable %in% c("b_Intercept", "b_V2", "b_V3", "b_V4", "loglik", "shape")
+    variable %in% c("b_Intercept", "b_age", "b_hip", "b_thigh", "loglik", "shape")
   ),
   max_rank = 1000)
 
@@ -190,9 +203,9 @@ gamma_discrepancy(
   scale_x_continuous(breaks = c(0, 0.5, 1)) +
     theme_bw(base_size = 12) +
     labs(title = "Traditional SBC",
-         subtitle = "Lower bound of  1e-15") +
-    theme(strip.text.x = element_text(size = 7),
-         strip.text.y = element_text(size = 7),
+         subtitle = "Lower bound of  1e-16") +
+    theme(strip.text.x = element_text(size = 9),
+         strip.text.y = element_text(size = 9),
          axis.ticks.y = element_blank(),
          axis.text.y = element_blank(),
          axis.ticks.x = element_blank(),
@@ -204,8 +217,8 @@ gamma_discrepancy(
     theme_bw(base_size = 12) +
     labs(title = "Traditional SBC",
          subtitle = "Lower bound of  1e-323") +
-    theme(strip.text.x = element_text(size = 7),
-         strip.text.y = element_text(size = 7),
+    theme(strip.text.x = element_text(size = 9),
+         strip.text.y = element_text(size = 9),
          axis.ticks.y = element_blank(),
          axis.text.y = element_blank(),
          axis.ticks.x = element_blank(),
@@ -216,9 +229,9 @@ gamma_discrepancy(
     scale_x_continuous(breaks = c(0, 0.5, 1)) +
      theme_bw(base_size = 12) +
      labs(title = "IFS Assisted SBC",
-         subtitle = "Lower bound of  1e-15") +
-     theme(strip.text.x = element_text(size = 7),
-           strip.text.y = element_text(size = 7),
+         subtitle = "Lower bound of  1e-16") +
+     theme(strip.text.x = element_text(size = 9),
+           strip.text.y = element_text(size = 9),
            axis.ticks.y = element_blank(),
            axis.text.y = element_blank(),
            axis.ticks.x = element_blank(),
@@ -228,7 +241,97 @@ gamma_discrepancy(
   plot_layout(guides = "collect") & theme(legend.position = "bottom")  
    
 
-ggsave("ecdf_plots_gamma_case.pdf", width = 210, height = (297 / 4)*1.15, units = "mm", useDingbats = TRUE)
+ggsave("ecdf_plots_gamma_case.pdf", width = 210, height = (297 / 4)*0.85, units = "mm", useDingbats = TRUE)
+```
+
+# Flat prior
+
+```{r, very-weakly-informative-prior}
+plan(multisession, workers = NCORES)
+n_sims <- 200
+N_PRE <- 15
+N_SBC <- 50
+K <- 13
+
+
+prior <- prior("", class = "b") +
+         prior("", class = "b", coef = "Intercept") +
+         prior("", class = "shape")
+
+#precon_data <- precon_ds_gamma(N = N_PRE, K = K)
+#precon_data <- precon_ds_trecator(N = N_PRE, K = K)
+#precon_data <- precon_ds_earnings(N = N_PRE, K = K)
+precon_data <- precon_ds_bodyfat(N = N_PRE, K = K)
+
+with_precon_sbc_df <- ifs_SBC(
+  fit = brm(bf(y ~ ., center = FALSE),
+    data = precon_data,
+    family = Gamma("log"),
+    prior = prior,
+    cores = 4,
+    sample_prior = "no",
+    silent = 2,
+    refresh = 0,
+    init = 0.1
+  ),
+  n_sims = n_sims,
+  ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
+  precon_sample = precon_data,
+  lb = 1e-16,
+  ub = 1e300,
+  truncate = TRUE
+)
+p_ifs = plot_ecdf_diff(
+   filter(
+    with_precon_sbc_df$ranks_df,
+    variable %in% c("b_Intercept", "b_age", "b_hip", "b_thigh", "loglik", "shape")
+  ),
+  max_rank = 1000)
+
+p_ifs = plot_ecdf_diff(
+  with_precon_sbc_df$ranks_df,
+  max_rank = 1000)
+p_ifs
+
+gamma_discrepancy(
+      filter(
+        with_precon_sbc_df$ranks_df,
+        variable == "loglik"
+      )$rank,
+      post_warmup_draws = 1000,
+      log = TRUE
+    )
+gamma_scores <- numeric(length = length(unique(with_precon_sbc_df$ranks_df$variable)))
+names(gamma_scores) = unique(with_precon_sbc_df$ranks_df$variable)
+
+for (key_variable in unique(with_precon_sbc_df$ranks_df$variable))
+{
+ gamma_scores[key_variable] = gamma_discrepancy(
+        filter(
+          with_precon_sbc_df$ranks_df,
+          variable == key_variable
+        )$rank,
+        post_warmup_draws = 1000,
+        log = TRUE
+      )
+}
+hist(gamma_scores)
+p_ifs +
+    scale_x_continuous(breaks = c(0, 0.5, 1)) +
+     theme_bw(base_size = 12) +
+     labs(title = "IFS Assisted SBC",
+         subtitle = "Lower bound of  1e-16") +
+     theme(strip.text.x = element_text(size = 9),
+           strip.text.y = element_text(size = 9),
+           axis.ticks.y = element_blank(),
+           axis.text.y = element_blank(),
+           axis.ticks.x = element_blank(),
+           axis.text.x = element_blank(),
+           plot.subtitle = element_text(size = 10),
+           legend.position = "bottom")
+   
+
+ggsave("ecdf_plots_gamma_case_flat.pdf", width = 210, height = (297 / 4)*1.15, units = "mm", useDingbats = TRUE)
 ```
 
 # Likelihood, Precon-Size, prior Scaling
@@ -236,14 +339,18 @@ ggsave("ecdf_plots_gamma_case.pdf", width = 210, height = (297 / 4)*1.15, units 
 ```{r, all-scaling}
 plan(multisession, workers = NCORES)
 # plan(sequential)
-n_sims <- 200
-N_PRE_list <- c(5, 10, 15, 16, 17, 18)
+n_sims <- 100
+N_PRE_list <- c(5, 10, 14, 15, 16, 20, 25, 30)
+#N_PRE_list <- c(30)
 N_SBC <- 50
-K <- 15
-REPLICATIONS <- 16
+K <- 13
+REPLICATIONS <- 10
 ds_gen_list <- list(
-  "gamma" = precon_ds_gamma
+  "gamma" = precon_ds_gamma,
+  "bodyfat" = precon_ds_bodyfat
 )
+
+RUN_VANILLA = TRUE
 
 # Roughly based on https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations
 prior_list <- list(
@@ -278,7 +385,7 @@ for (r in seq_len(REPLICATIONS)){
   
     if (names(prior_list)[[p]] != "flat") {
       prior_only_fit <- brm(bf(y ~ ., center = FALSE),
-        data = precon_ds_gamma(N = 50, K = 15),
+        data = ds_gen_list[[1]](N = 50, K = K),
         family = Gamma("log"),
         prior = loop_prior,
         cores = 4,
@@ -287,12 +394,13 @@ for (r in seq_len(REPLICATIONS)){
         refresh = 0,
         init_r = 0.1
       )
-  
-      vanilla_sbc_df <- ifs_SBC(
+      
+      if (RUN_VANILLA) {
+        vanilla_sbc_df <- ifs_SBC(
         fit = prior_only_fit,
         n_sims = n_sims,
         ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
-        lb = 1e-15,
+        lb = 1e-16,
         ub = 1e300,
         truncate = TRUE
       )
@@ -302,7 +410,9 @@ for (r in seq_len(REPLICATIONS)){
         vanilla_result_df <- bind_rows(
           vanilla_result_df,
           list(
-            sbc_version = "vanilla",
+            precon_size = 0,
+            precon_likelihood = "none",
+            sbc_version = "Traditional",
             variable = key_variable,
             log_gamma_score = gamma_discrepancy(
               filter(
@@ -313,9 +423,11 @@ for (r in seq_len(REPLICATIONS)){
               log = TRUE
             ),
             prior_version = names(prior_list)[[p]],
-            ranks_df = list(vanilla_sbc_df$ranks_df)
+            ranks_df = list(vanilla_sbc_df$ranks_df),
+            precon_data = list(precon_data)
           )
         )
+      }
       }
     }
   
@@ -347,6 +459,7 @@ for (r in seq_len(REPLICATIONS)){
             family = Gamma("log"),
             prior = loop_prior,
             cores = 4,
+            sample_prior = "no",
             silent = 2,
             refresh = 0,
             init_r = 0.1
@@ -357,19 +470,19 @@ for (r in seq_len(REPLICATIONS)){
           n_sims = n_sims,
           ppred_data_gen = partial(ds_gen, n_sbc = !!N_SBC),
           precon_sample = precon_data,
-          lb = 1e-15,
+          lb = 1e-16,
           ub = 1e300,
           truncate = TRUE
         )
   
-        for (key_variable in unique(vanilla_sbc_df$ranks_df$variable))
+        for (key_variable in unique(with_precon_sbc_df$ranks_df$variable))
         {
           ifs_result_df <- bind_rows(
             ifs_result_df,
             list(
               precon_size = N_PRE,
               precon_likelihood = names(ds_gen_list)[[j]],
-              sbc_version = "ifs",
+              sbc_version = "IFS",
               variable = key_variable,
               log_gamma_score = gamma_discrepancy(
                 filter(
@@ -380,7 +493,8 @@ for (r in seq_len(REPLICATIONS)){
                 log = TRUE
               ),
               prior_version = names(prior_list)[[p]],
-              ranks_df = list(vanilla_sbc_df$ranks_df)
+              ranks_df = list(with_precon_sbc_df$ranks_df),
+              precon_data = list(precon_data)
             )
           )
         }
@@ -389,13 +503,27 @@ for (r in seq_len(REPLICATIONS)){
   }
 }
 
+saveRDS(ifs_result_df,"ifs.RDS")
+saveRDS(vanilla_result_df, "vanilla.RDS")
 ```
 
 ## Plots
+
 ```{r, plots}
-padded_vanilla_df <- expand_grid(vanilla_result_df, data.frame(precon_size = N_PRE_list))
+# ifs_result_df = readRDS("ifs.RDS")
+# vanilla_result_df = readRDS("vanilla.RDS")
+# vanilla_result_df = readRDS("archive/vanilla.RDS")
+# old_ifs_result_df = readRDS("archive/ifs.RDS")
+# ifs_result_df = rbind(ifs_result_df, old_ifs_result_df)
+#results = readRDS("results.RDS")
+padded_vanilla_df <- vanilla_result_df %>%
+  select(-c(precon_likelihood)) %>%
+  expand_grid(data.frame(precon_likelihood = unique(ifs_result_df$precon_likelihood)))
 
 bind_rows(padded_vanilla_df, ifs_result_df) |>
+# readRDS("results.RDS") |>
+  #ifs_result_df |>
+  #filter(precon_size <= 30) |>
   mutate(
     prior_version = case_when(
       prior_version == "flat" ~ "Flat",
@@ -403,10 +531,10 @@ bind_rows(padded_vanilla_df, ifs_result_df) |>
       prior_version == "very-weakly-informative" ~ "Very weakly-informative",
       prior_version == "weakly-informative" ~ "Weakly-informative"
       ),
-    sbc_version = case_when(
-      sbc_version == "ifs" ~ "IFS",
-      sbc_version == "vanilla" ~ "Vanilla"
-    ),
+    precon_likelihood = case_when(
+      precon_likelihood == "gamma" ~ "Simulated",
+      precon_likelihood == "bodyfat" ~ "Bodyfat"
+      ),
     precon_size = as.factor(precon_size)
   )|>
   mutate(
@@ -415,29 +543,162 @@ bind_rows(padded_vanilla_df, ifs_result_df) |>
     )
     )
   )|>
+  filter(is.finite(log_gamma_score),
+         !is.na(log_gamma_score)) |>
   ggplot(aes(x = precon_size, y = log_gamma_score)) +
   stat_pointinterval(aes(color = sbc_version),
-                     position = position_dodge(width = 0.6),
                       .width = c(0.66, 0.90),
                      fatten_point = 1) +
   scale_size_continuous(range = c(1, 4))+
-  facet_grid(~prior_version) +
+  facet_grid(precon_likelihood~prior_version) +
   theme_bw() +
-  geom_hline(yintercept = log(SBC:::adjust_gamma(N = 1000, L = 1))) +
+  geom_hline(yintercept = log(SBC:::adjust_gamma(N = 1000, L = 1, conf_level = 0.95))) +
   scale_y_continuous(trans = "pseudo_log", breaks = c(0, -10, -100, -1000)) +
   theme_bw(base_size = 12) +
   theme(strip.text.x = element_text(size = 9),
         strip.text.y = element_text(size = 9),
-        axis.ticks.y = element_blank()) +
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(size = 10),
+        legend.position = "bottom") +
   xlab("Preconditioning Sample Size") +
-  ylab("Log-Gamma Score") +
+  ylab("Log Gamma Threshold") +
   labs(color = "SBC Version") +
   scale_color_manual(values = c('#4477AA', '#EE6677'))
 
-ggsave("gamma_case.pdf", width = 210, height = (297 / 4), units = "mm", useDingbats = TRUE)
+ggsave("gamma_case.pdf", width = 210, height = (297 / 4)*1.2, units = "mm", useDingbats = TRUE)
 
 bind_rows(padded_vanilla_df, ifs_result_df) |>
   saveRDS(file = "results.RDS")
+```
+
+# Figure 1
+
+```{r}
+plan(multisession, workers = NCORES)
+n_sims <- 200
+N_SBC <- 50
+K <- 13
+
+prior <- prior(normal(0, 1), class = "b") +
+    prior(normal(2, 5), class = "b", coef = "Intercept") +
+    prior(gamma(0.1, 0.1), class = "shape")
+
+precon_data = precon_ds_bodyfat(N = 50, K = K)
+#precon_data = precon_ds_gamma(N = 15, K = K)
+
+prior_only_fit <- brm(bf(y ~ ., center = FALSE),
+  data = precon_data,
+  family = Gamma("log"),
+  prior = prior,
+  cores = 4,
+  sample_prior = "only",
+  silent = 2,
+  refresh = 0,
+  control = list(adapt_delta = 0.999, max_treedepth = 20)
+)
+
+fit_5 = update(prior_only_fit,
+    newdata = precon_data[1:5,],
+    family = Gamma("log"),
+    prior = prior,
+    cores = 4,
+    sample_prior = "no",
+    silent = 2,
+    refresh = 0,
+    init = 0.1
+  )
+
+fit_7 = update(prior_only_fit,
+    newdata = precon_data[1:7,],
+    family = Gamma("log"),
+    prior = prior,
+    cores = 4,
+    sample_prior = "no",
+    silent = 2,
+    refresh = 0,
+    control = list(adapt_delta = 0.999, max_treedepth = 20)
+  )
+
+fit_10 = update(prior_only_fit,
+    newdata = precon_data[1:10,],
+    family = Gamma("log"),
+    prior = prior,
+    cores = 4,
+    sample_prior = "no",
+    silent = 2,
+    refresh = 0,
+    control = list(adapt_delta = 0.999, max_treedepth = 20)
+  )
+
+d5 = as.data.frame(as_draws_matrix(fit_5, variable = c("b_V2", "b_V6")))
+d5$source = "IFS Prior"
+d5$precon_size = 5
+
+d7 = as.data.frame(as_draws_matrix(fit_7, variable = c("b_V2", "b_V6")))
+d7$source =  "IFS Prior"
+d7$precon_size = 7
+
+d10 = as.data.frame(as_draws_matrix(fit_10, variable = c("b_V2", "b_V6")))
+d10$source =  "IFS Prior"
+d10$precon_size = 10
+
+data.grid <- expand.grid(b_V2 = seq(-2.5, 2.5, length.out=1000), b_V6 = seq(-2.5, 2.5, length.out=1000))
+q2.samp = cbind(data.grid, prob = dmvnorm(data.grid, mean = c(0, 0), sigma=diag(1, 2)))
+q2.samp$source = "Original Prior"
+q2.samp = bind_rows(q2.samp, q2.samp, q2.samp, q2.samp)
+q2.samp$precon_size = c(rep(0, 1000000), rep(5, 1000000), rep(7, 1000000), rep(10, 1000000))
+
+p1 = ggplot() +
+  geom_contour(data=q2.samp,aes(x=b_V2,y=b_V6,z=prob, color = source)) +
+  geom_point(data = bind_rows(d5, d7, d10), aes(x = b_V2, y = b_V6, color = source), alpha = 0.1) +
+  facet_grid(.~precon_size) +
+  theme_bw(base_size = 12) +
+  theme(strip.text.x = element_text(size = 9),
+        strip.text.y = element_text(size = 9),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(size = 10)) +
+  labs(color = element_blank()) +
+  xlab(TeX("$beta_2$")) + ylab(TeX("$beta_6$")) +
+  scale_color_manual(values = c('#4477AA', '#EE6677')) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1)))
+
+
+#sample_5 = data.frame(y = c(posterior_predict(fit_5, newdata = ds_gen(10, fit_5))), precon_size = 5)
+#sample_7 = data.frame(y = c(posterior_predict(fit_7, newdata = ds_gen(10, fit_7))), precon_size = 7)
+#sample_10 = data.frame(y = c(posterior_predict(fit_10, newdata = ds_gen(10, fit_10))), precon_size = 10)
+
+
+p2 = ggplot(as_tibble(bayes_R2(prior_only_fit, summary = FALSE)), aes(x = R2, after_stat(density))) +
+  geom_histogram() +
+  theme_bw(base_size = 12) +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+p3 = ggplot(as_tibble(bayes_R2(fit_5, summary = FALSE)), aes(x = R2, after_stat(density))) +
+  geom_histogram() +
+  theme_bw(base_size = 12) +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+p4 = ggplot(as_tibble(bayes_R2(fit_7, summary = FALSE)), aes(x = R2, after_stat(density))) +
+  geom_histogram() +
+  theme_bw(base_size = 12) +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+p5 = ggplot(as_tibble(bayes_R2(fit_10, summary = FALSE)), aes(x = R2, y = after_stat(density))) +
+  geom_histogram() +
+   theme_bw(base_size = 12) +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+
+
+p1 /
+  (p2 + p3 + p4 + p5 + plot_layout(axes = "collect", ncol = 4))
+
+
+ggsave("fig_1.pdf", width = 210, height = (297 / 4)*1.05, units = "mm", useDingbats = TRUE)
 ```
 
 # END

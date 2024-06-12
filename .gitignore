@@ -73,3 +73,6 @@ data/derived_data/
 
 notebook/**/**_cache
 notebook/**/**_files
+
+**/**.RDS
+**/**.png
