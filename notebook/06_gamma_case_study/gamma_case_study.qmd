@@ -49,6 +49,7 @@ target <- "siri"
 full_precon_data <- df[,c(pred, target)]
 full_precon_data <- full_precon_data %>%
   filter(siri > 0)
+full_precon_data[pred] = scale(full_precon_data[pred])
 names(full_precon_data) = c('V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10', 'V11', 'V12', 'V13', 'V14', "y")
 
 precon_ds_bodyfat <- function(N, K) {
@@ -579,78 +580,98 @@ n_sims <- 200
 N_SBC <- 50
 K <- 13
 
-prior <- prior(normal(0, 1), class = "b") +
-    prior(normal(2, 5), class = "b", coef = "Intercept") +
-    prior(gamma(0.1, 0.1), class = "shape")
+gamma2 <- custom_family(
+  name = "gamma2",
+  dpars = c("mu", "sigma"),
+  links = c("log", "log"),
+  type = "real", lb = c(0, 0)
+)
+stan_gamma2 <- "
+  real gamma2_lpdf(real y, real mu, real sigma) {
+    return gamma_lpdf(y | mu * mu / sigma^2, mu / sigma^2);
+}"
+svars <- stanvar(scode = stan_gamma2, block = "functions")
+posterior_epred_gamma2 <- function(draws) {
+  draws$dpars$mu
+}
 
-precon_data = precon_ds_bodyfat(N = 50, K = K)
+# prior <- prior(normal(0, 2), class = "b") +
+#     prior(normal(0, 10), class = "b", coef = "Intercept") +
+#     prior(normal(4, 1), class = "sigma")
+prior <- prior <- prior(normal(0, 0.5), class = "b") +
+    prior(normal(4, 2), class = "b", coef = "Intercept") +
+    prior(normal(5, 1), class = "sigma")
+
+set.seed(100)
+
+precon_data = precon_ds_bodyfat(N = 20, K = K)
 #precon_data = precon_ds_gamma(N = 15, K = K)
 
 prior_only_fit <- brm(bf(y ~ ., center = FALSE),
   data = precon_data,
-  family = Gamma("log"),
+  family = gamma2,
   prior = prior,
   cores = 4,
   sample_prior = "only",
-  silent = 2,
-  refresh = 0,
-  control = list(adapt_delta = 0.999, max_treedepth = 20)
+  stanvars = svars
 )
 
 fit_5 = update(prior_only_fit,
     newdata = precon_data[1:5,],
-    family = Gamma("log"),
+    family = gamma2,
     prior = prior,
     cores = 4,
     sample_prior = "no",
     silent = 2,
     refresh = 0,
-    init = 0.1
-  )
-
-fit_7 = update(prior_only_fit,
-    newdata = precon_data[1:7,],
-    family = Gamma("log"),
-    prior = prior,
-    cores = 4,
-    sample_prior = "no",
-    silent = 2,
-    refresh = 0,
-    control = list(adapt_delta = 0.999, max_treedepth = 20)
+    control = list(adapt_delta = 0.999, max_treedepth = 15),
+  stanvars = svars
   )
 
 fit_10 = update(prior_only_fit,
     newdata = precon_data[1:10,],
-    family = Gamma("log"),
+    family = gamma2,
     prior = prior,
     cores = 4,
     sample_prior = "no",
     silent = 2,
     refresh = 0,
-    control = list(adapt_delta = 0.999, max_treedepth = 20)
+    control = list(adapt_delta = 0.999, max_treedepth = 15),
+  stanvars = svars
+  )
+
+fit_20 = update(prior_only_fit,
+    newdata = precon_data[1:20,],
+    family = gamma2,
+    prior = prior,
+    cores = 4,
+    sample_prior = "no",
+    silent = 2,
+    refresh = 0,
+    control = list(adapt_delta = 0.999, max_treedepth = 15),
+  stanvars = svars
   )
 
 d5 = as.data.frame(as_draws_matrix(fit_5, variable = c("b_V2", "b_V6")))
-d5$source = "IFS Prior"
+d5$source = "Implicit Prior"
 d5$precon_size = 5
 
-d7 = as.data.frame(as_draws_matrix(fit_7, variable = c("b_V2", "b_V6")))
-d7$source =  "IFS Prior"
-d7$precon_size = 7
-
 d10 = as.data.frame(as_draws_matrix(fit_10, variable = c("b_V2", "b_V6")))
-d10$source =  "IFS Prior"
+d10$source =  "Implicit Prior"
 d10$precon_size = 10
 
-data.grid <- expand.grid(b_V2 = seq(-2.5, 2.5, length.out=1000), b_V6 = seq(-2.5, 2.5, length.out=1000))
-q2.samp = cbind(data.grid, prob = dmvnorm(data.grid, mean = c(0, 0), sigma=diag(1, 2)))
+d20 = as.data.frame(as_draws_matrix(fit_15, variable = c("b_V2", "b_V6")))
+d20$source =  "Implicit Prior"
+d20$precon_size = 20
+
+data.grid <- expand.grid(b_V2 = seq(-2, 2, length.out=1000), b_V6 = seq(-2, 2, length.out=1000))
+q2.samp = cbind(data.grid, prob = dmvnorm(data.grid, mean = c(0, 0), sigma=diag(0.5, 2)))
 q2.samp$source = "Original Prior"
-q2.samp = bind_rows(q2.samp, q2.samp, q2.samp, q2.samp)
-q2.samp$precon_size = c(rep(0, 1000000), rep(5, 1000000), rep(7, 1000000), rep(10, 1000000))
+q2.samp$precon_size = c(rep(0, 1000000))
 
 p1 = ggplot() +
   geom_contour(data=q2.samp,aes(x=b_V2,y=b_V6,z=prob, color = source)) +
-  geom_point(data = bind_rows(d5, d7, d10), aes(x = b_V2, y = b_V6, color = source), alpha = 0.1) +
+  geom_point(data = bind_rows(d5, d10, d20), aes(x = b_V2, y = b_V6, color = source), alpha = 0.1) +
   facet_grid(.~precon_size) +
   theme_bw(base_size = 12) +
   theme(strip.text.x = element_text(size = 9),
@@ -660,6 +681,7 @@ p1 = ggplot() +
   labs(color = element_blank()) +
   xlab(TeX("$beta_2$")) + ylab(TeX("$beta_6$")) +
   scale_color_manual(values = c('#4477AA', '#EE6677')) +
+  scale_x_continuous(breaks = c(-1, 0, 1)) +
   guides(colour = guide_legend(override.aes = list(alpha = 1)))
 
 
@@ -667,38 +689,63 @@ p1 = ggplot() +
 #sample_7 = data.frame(y = c(posterior_predict(fit_7, newdata = ds_gen(10, fit_7))), precon_size = 7)
 #sample_10 = data.frame(y = c(posterior_predict(fit_10, newdata = ds_gen(10, fit_10))), precon_size = 10)
 
+custom_R2 <- function(fit) {
+  var_e <- as.data.frame(fit, variable = "sigma")$sigma^2
+  draws_ypred <- posterior_epred(fit, newdata = full_precon_data)
+  var_ypred <- matrixStats::rowVars(draws_ypred)
+  R2 <- as.matrix(var_ypred / (var_ypred + var_e))
+  colnames(R2) <- "R2"
+  R2
+}
 
-p2 = ggplot(as_tibble(bayes_R2(prior_only_fit, summary = FALSE)), aes(x = R2, after_stat(density))) +
+
+p2 = ggplot(as_tibble(custom_R2(prior_only_fit)), aes(x = R2, after_stat(density))) +
   geom_histogram() +
+  coord_cartesian(xlim = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+  ylab("Density") +
+  xlab(TeX("$R^2$")) +
   theme_bw(base_size = 12) +
   theme(axis.ticks.y = element_blank(),
         axis.text.y = element_blank())
 
-p3 = ggplot(as_tibble(bayes_R2(fit_5, summary = FALSE)), aes(x = R2, after_stat(density))) +
+p3 = ggplot(as_tibble(custom_R2(fit_5)), aes(x = R2, after_stat(density))) +
   geom_histogram() +
+  coord_cartesian(xlim = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+  ylab("Density") +
+  xlab(TeX("$R^2$")) +
   theme_bw(base_size = 12) +
   theme(axis.ticks.y = element_blank(),
         axis.text.y = element_blank())
 
-p4 = ggplot(as_tibble(bayes_R2(fit_7, summary = FALSE)), aes(x = R2, after_stat(density))) +
+p4 = ggplot(as_tibble(custom_R2(fit_7)), aes(x = R2, after_stat(density))) +
   geom_histogram() +
+  coord_cartesian(xlim = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+  ylab("Density") +
+  xlab(TeX("$R^2$")) +
   theme_bw(base_size = 12) +
   theme(axis.ticks.y = element_blank(),
         axis.text.y = element_blank())
 
-p5 = ggplot(as_tibble(bayes_R2(fit_10, summary = FALSE)), aes(x = R2, y = after_stat(density))) +
+p5 = ggplot(as_tibble(custom_R2(fit_10)), aes(x = R2, y = after_stat(density))) +
   geom_histogram() +
-   theme_bw(base_size = 12) +
+  coord_cartesian(xlim = c(0, 1)) +
+  scale_x_continuous(breaks = c(0, 0.5, 1)) +
+  ylab("Density") +
+  xlab(TeX("$R^2$")) +
+  theme_bw(base_size = 12) +
   theme(axis.ticks.y = element_blank(),
         axis.text.y = element_blank())
 
 
 
-p1 /
+f1 = p1 /
   (p2 + p3 + p4 + p5 + plot_layout(axes = "collect", ncol = 4))
 
 
-ggsave("fig_1.pdf", width = 210, height = (297 / 4)*1.05, units = "mm", useDingbats = TRUE)
+ggsave("fig_1.pdf",f1, width = 210, height = (297 / 4)*1.5, units = "mm", useDingbats = TRUE)
 ```
 
 # END
