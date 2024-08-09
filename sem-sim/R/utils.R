@@ -260,7 +260,7 @@ utils.scholzplot = function(df) {
     ) %>%
     mutate(
       isifs = ifelse(num_precon == 0,
-        "IFS", "Traditional"),
+        "Original", "Implicit"),
       num_precon = factor(num_precon,
         levels = unique(num_precon), ordered = TRUE),
       log_gamma = ifelse(is.infinite(log_gamma),
@@ -276,7 +276,7 @@ utils.scholzplot = function(df) {
     geom_hline(yintercept = log(SBC:::adjust_gamma(N = 399, L = 1))) +
     scale_y_continuous(trans = "pseudo_log",
       breaks = c(0, -10, -100, -1000),
-      labels = c(0, -10, -100, "< -1000")) +
+      labels = c(0, -10, -100, "≤ -1000")) +
     theme_bw(base_size = 12) +
     theme(
       strip.text.x = element_text(size = 9),
@@ -284,9 +284,9 @@ utils.scholzplot = function(df) {
       axis.ticks.y = element_blank()
     ) +
     xlab("Preconditioning Sample Size") +
-    ylab("Log-Gamma Score") +
-    labs(color = "SBC Version") +
-    scale_color_manual(values = c("#EE6677", "#4477AA"))
+    ylab("log(γ) score") +
+    labs(color = "Prior") +
+    scale_color_manual(values = c("#4477AA", "#EE6677"))
 }
 
 utils.rhatplot = \(df, opt) {
